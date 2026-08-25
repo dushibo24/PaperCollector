@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "selected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "paper_id": { "type": "string" },
+          "rank": { "type": "integer", "minimum": 1 },
+          "value_probability": { "type": "number", "minimum": 0, "maximum": 1 },
+          "rationale": { "type": "string" },
+          "concerns": { "type": "array", "items": { "type": "string" } },
+          "verification_questions": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["paper_id", "rank", "value_probability", "rationale", "concerns", "verification_questions"]
+      }
+    },
+    "selection_notes": { "type": "string" }
+  },
+  "required": ["selected", "selection_notes"]
+}
+

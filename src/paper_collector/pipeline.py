@@ -1,0 +1,364 @@
+from __future__ import annotations
+
+import fcntl
+import json
+import logging
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import fields
+from datetime import UTC, datetime
+from pathlib import Path
+
+from paper_collector.codex_agent import AgentError, CodexAgent
+from paper_collector.config import AppConfig
+from paper_collector.db import StateDB, normalized_title
+from paper_collector.models import Paper, Review
+from paper_collector.notifiers import NotifyError, ServerChanNotifier, WeComNotifier
+from paper_collector.pdf_tools import (
+    PDFError,
+    download_pdf,
+    extract_text,
+    safe_stem,
+    translate_dual,
+)
+from paper_collector.publishers import BaiduPCSGoPublisher
+from paper_collector.scoring import score_paper
+from paper_collector.sources import (
+    ArxivSource,
+    OpenAlexSource,
+    SemanticScholarEnricher,
+    SourceError,
+)
+
+LOGGER = logging.getLogger("paper_collector")
+
+
+@contextmanager
+def single_instance(lock_path: Path) -> Iterator[None]:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("已有一个 Paper Collector 实例正在运行") from exc
+        yield
+
+
+def _review_dict(review: Review) -> dict:
+    return {field.name: getattr(review, field.name) for field in fields(review)}
+
+
+def render_brief(paper: Paper, review: Review) -> str:
+    authors = "、".join(author.name for author in paper.authors[:5])
+    if len(paper.authors) > 5:
+        authors += " 等"
+    venue = paper.venue or "预印本"
+    contributions = "\n".join(f"- {item}" for item in review.contributions)
+    evidence = "\n".join(f"- {item}" for item in review.evidence)
+    limitations = "\n".join(f"- {item}" for item in review.limitations)
+    tags = " ".join(f"#{item.replace(' ', '_')}" for item in review.tags)
+    return f"""# 今日论文｜{review.title_zh}
+
+> {review.hook}
+
+**原题**：{paper.title}  
+**作者**：{authors}  
+**发表**：{venue} · {paper.publication_date}  
+**推荐分**：{review.overall_score:.1f}/10（置信度 {review.confidence:.0%}）  
+**链接**：{paper.landing_url or paper.pdf_url or ""}
+
+## 为什么今天值得看
+
+{review.why_now}
+
+## 论文讲了什么
+
+{review.summary}
+
+## 核心贡献
+
+{contributions}
+
+## 关键实验依据
+
+{evidence}
+
+## 冷静看：限制与疑点
+
+{limitations}
+
+**适合谁读**：{review.audience}
+
+{tags}
+"""
+
+
+def brief_for_wecom(paper: Paper, review: Review) -> str:
+    contributions = "\n".join(f"> • {item}" for item in review.contributions[:3])
+    limitations = "；".join(review.limitations[:2])
+    return f"""## 今日论文｜{review.title_zh}
+> **{review.hook}**
+
+{review.summary}
+
+**核心贡献**
+{contributions}
+
+**冷静看**：{limitations}
+<font color=\"info\">推荐 {review.overall_score:.1f}/10 · {paper.venue or "预印本"} · {paper.publication_date}</font>"""
+
+
+def brief_for_serverchan(paper: Paper, review: Review, share_url: str, share_password: str) -> str:
+    contributions = "\n".join(f"- {item}" for item in review.contributions[:4])
+    evidence = "\n".join(f"- {item}" for item in review.evidence[:4])
+    limitations = "\n".join(f"- {item}" for item in review.limitations[:3])
+    return f"""# 今日论文｜{review.title_zh}
+
+> {review.hook}
+
+{review.summary}
+
+## 核心贡献
+
+{contributions}
+
+## 关键证据
+
+{evidence}
+
+## 冷静看
+
+{limitations}
+
+## 下载中英双语 PDF
+
+[打开百度网盘分享]({share_url})  
+提取码：`{share_password}`  
+链接有效期以百度网盘页面显示为准。
+
+---
+
+原题：{paper.title}  
+发表：{paper.venue or "预印本"} · {paper.publication_date}  
+推荐分：{review.overall_score:.1f}/10  
+[论文原始页面]({paper.landing_url or paper.pdf_url or share_url})
+"""
+
+
+class Pipeline:
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.config.data_dir.mkdir(parents=True, exist_ok=True)
+        self.db = StateDB(self.config.data_dir / "state.sqlite3")
+        self.openalex = OpenAlexSource(config)
+        self.arxiv = ArxivSource(config)
+        self.s2 = SemanticScholarEnricher(config.semantic_scholar_api_key)
+        self.agent = CodexAgent(config)
+
+    def close(self) -> None:
+        self.db.close()
+
+    def discover(self, run_id: int | None = None) -> list[Paper]:
+        merged: dict[str, Paper] = {}
+        ids_by_title: dict[str, str] = {}
+        sources = [self.openalex, self.arxiv]
+        for interest in self.config.interests:
+            for source in sources:
+                try:
+                    found = source.discover(interest)
+                except SourceError as exc:
+                    LOGGER.warning(
+                        "%s / %s 抓取失败：%s", source.__class__.__name__, interest.name, exc
+                    )
+                    self.db.event("source_error", run_id=run_id, detail=str(exc))
+                    continue
+                for paper in found:
+                    title_key = normalized_title(paper.title)
+                    merge_id = paper.id if paper.id in merged else ids_by_title.get(title_key)
+                    if merge_id:
+                        current = merged[merge_id]
+                        current.matched_interests = sorted(
+                            set(current.matched_interests + paper.matched_interests)
+                        )
+                        current.pdf_url = current.pdf_url or paper.pdf_url
+                        current.landing_url = current.landing_url or paper.landing_url
+                        current.cited_by_count = max(current.cited_by_count, paper.cited_by_count)
+                    else:
+                        merged[paper.id] = paper
+                        ids_by_title[title_key] = paper.id
+        papers = [score_paper(paper, self.config) for paper in merged.values()]
+        for paper in papers:
+            self.db.upsert_paper(paper)
+        self.db.event("discovered", run_id=run_id, detail=f"{len(papers)} unique works")
+        return papers
+
+    def _prepare_candidates(self) -> list[Paper]:
+        papers = [score_paper(paper, self.config) for paper in self.db.eligible_papers()]
+        papers.sort(key=lambda item: item.deterministic_score, reverse=True)
+        enriched: list[Paper] = []
+        for paper in papers[: max(20, self.config.shortlist_size * 4)]:
+            paper = self.s2.enrich(paper)
+            if paper.source == "openalex":
+                paper = self.openalex.enrich_authors(paper)
+            paper = score_paper(paper, self.config)
+            self.db.upsert_paper(paper)
+            enriched.append(paper)
+        enriched.sort(key=lambda item: item.deterministic_score, reverse=True)
+        return enriched
+
+    def _artifact_dir(self, paper: Paper) -> Path:
+        return self.config.data_dir / "papers" / safe_stem(paper.id)
+
+    def _ensure_artifacts(self, paper: Paper, review: Review, row=None) -> tuple[Path, Path, Path]:
+        artifact_dir = self._artifact_dir(paper)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        original = Path(row["original_pdf"]) if row is not None and row["original_pdf"] else None
+        if not original or not original.exists():
+            if not paper.pdf_url:
+                raise PDFError("没有可公开下载的 PDF URL")
+            original = download_pdf(paper.pdf_url, artifact_dir / "original.pdf")
+            self.db.save_artifacts(paper.id, original_pdf=original)
+        brief = (
+            Path(row["brief_path"])
+            if row is not None and row["brief_path"]
+            else artifact_dir / "brief.md"
+        )
+        brief.write_text(render_brief(paper, review), encoding="utf-8")
+        self.db.save_artifacts(paper.id, brief_path=brief)
+        dual = Path(row["dual_pdf"]) if row is not None and row["dual_pdf"] else None
+        if not dual or not dual.exists():
+            translated = translate_dual(original, artifact_dir / "translated", self.config)
+            suffix = "中英双语" if self.config.translation_enabled else "英文原文"
+            friendly = artifact_dir / (
+                f"{safe_stem(paper.id, 18)}-{safe_stem(review.title_zh, 60)}-{suffix}.pdf"
+            )
+            if translated != friendly:
+                shutil.copy2(translated, friendly)
+            dual = friendly
+            self.db.save_artifacts(paper.id, dual_pdf=dual)
+        self.db.set_status(paper.id, "translated")
+        return original, dual, brief
+
+    def _deliver(self, paper: Paper, review: Review, dual: Path, row=None) -> None:
+        channel = self.config.notify_channel
+        row = self.db.work_row(paper.id)
+        if channel == "serverchan":
+            if not self.config.serverchan_sendkey:
+                raise NotifyError("缺少 SERVERCHAN_SENDKEY；产物已生成但未推送")
+            share_url = row["share_url"]
+            share_password = row["share_password"]
+            if not share_url:
+                share = BaiduPCSGoPublisher(self.config).publish(dual)
+                self.db.save_share(paper.id, share.remote_path, share.url, share.password)
+                share_url = share.url
+                share_password = share.password
+            ServerChanNotifier(self.config.serverchan_sendkey).send(
+                f"今日论文｜{review.title_zh}",
+                brief_for_serverchan(paper, review, share_url, share_password or ""),
+            )
+            self.db.mark_link_delivered(paper.id)
+            return
+
+        if channel == "wecom":
+            if not self.config.wecom_enabled:
+                raise NotifyError("notify.wecom_enabled=false；产物已生成但未推送")
+            if not self.config.wecom_webhook_key:
+                raise NotifyError("缺少 WECOM_WEBHOOK_KEY；产物已生成但未推送")
+            notifier = WeComNotifier(self.config.wecom_webhook_key)
+            summary_done = bool(row["summary_delivered_at"])
+            if not summary_done:
+                notifier.send_markdown(brief_for_wecom(paper, review))
+                self.db.mark_summary_delivered(paper.id)
+            notifier.send_file(dual)
+            self.db.mark_file_delivered(paper.id)
+            return
+
+        raise NotifyError("notify.channel=none；产物已生成但未推送")
+
+    def _resume_pending(self, row, *, no_notify: bool) -> str:
+        paper = Paper.from_dict(json.loads(row["paper_json"]))
+        review = Review.from_dict(json.loads(row["review_json"]))
+        _, dual, _ = self._ensure_artifacts(paper, review, row=row)
+        if no_notify:
+            LOGGER.info("待推送产物已准备：%s", dual)
+            return paper.id
+        self._deliver(paper, review, dual, row=row)
+        return paper.id
+
+    def run(self, *, dry_run: bool = False, no_notify: bool = False) -> str | None:
+        with single_instance(self.config.data_dir / "paper-collector.lock"):
+            run_id = self.db.start_run()
+            selected_id: str | None = None
+            try:
+                pending = self.db.pending_delivery()
+                if pending and not dry_run:
+                    selected_id = self._resume_pending(pending, no_notify=no_notify)
+                    self.db.finish_run(
+                        run_id, "prepared" if no_notify else "delivered", selected_id
+                    )
+                    return selected_id
+
+                self.discover(run_id)
+                candidates = self._prepare_candidates()
+                if not candidates:
+                    self.db.finish_run(run_id, "empty")
+                    return None
+                stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+                run_dir = self.config.data_dir / "runs" / f"{run_id}-{stamp}"
+                ranked = self.agent.rank(candidates[:40], run_dir)
+                self.db.event(
+                    "ranked", run_id=run_id, detail=json.dumps(ranked, ensure_ascii=False)
+                )
+                if dry_run:
+                    selected_id = ranked[0]["paper_id"] if ranked else None
+                    self.db.finish_run(run_id, "dry-run", selected_id)
+                    return selected_id
+
+                by_id = {paper.id: paper for paper in candidates}
+                for rank_context in ranked[: self.config.max_deep_reviews]:
+                    paper = by_id[rank_context["paper_id"]]
+                    selected_id = paper.id
+                    self.db.set_status(paper.id, "ranked")
+                    if not paper.pdf_url:
+                        self.db.reject(paper.id, "没有公开 PDF，无法全文审读")
+                        continue
+                    artifact_dir = self._artifact_dir(paper)
+                    try:
+                        original = download_pdf(paper.pdf_url, artifact_dir / "original.pdf")
+                        self.db.save_artifacts(paper.id, original_pdf=original)
+                        text = extract_text(original)
+                        (artifact_dir / "extracted.txt").write_text(text, encoding="utf-8")
+                        review = self.agent.review(paper, text, rank_context, run_dir)
+                    except (PDFError, AgentError) as exc:
+                        self.db.set_status(paper.id, "failed", str(exc))
+                        self.db.event("review_error", run_id, paper.id, str(exc))
+                        LOGGER.warning("审读 %s 失败：%s", paper.title, exc)
+                        continue
+                    self.db.save_review(paper.id, review)
+                    if (
+                        not review.recommend
+                        or review.overall_score < self.config.min_recommendation_score
+                    ):
+                        reason = (
+                            review.rejection_reason
+                            or f"深读得分 {review.overall_score:.1f} 未达阈值"
+                        )
+                        self.db.reject(paper.id, reason)
+                        self.db.event("rejected", run_id, paper.id, reason)
+                        continue
+                    _, dual, _ = self._ensure_artifacts(paper, review)
+                    if no_notify:
+                        self.db.finish_run(run_id, "prepared", paper.id)
+                        return paper.id
+                    self._deliver(paper, review, dual)
+                    self.db.event("delivered", run_id, paper.id, str(dual))
+                    self.db.finish_run(run_id, "delivered", paper.id)
+                    return paper.id
+                self.db.finish_run(run_id, "no-recommendation", selected_id)
+                return None
+            except Exception as exc:
+                if selected_id:
+                    self.db.set_status(selected_id, "failed", str(exc))
+                self.db.finish_run(run_id, "failed", selected_id, str(exc))
+                raise

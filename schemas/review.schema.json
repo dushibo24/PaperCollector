@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "paper_id": { "type": "string" },
+    "recommend": { "type": "boolean" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "overall_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "relevance_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "content_quality_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "novelty_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "impact_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "timeliness_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "evidence_quality_score": { "type": "number", "minimum": 0, "maximum": 10 },
+    "verdict": { "type": "string" },
+    "rejection_reason": { "type": "string" },
+    "title_zh": { "type": "string" },
+    "hook": { "type": "string" },
+    "summary": { "type": "string" },
+    "contributions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 5 },
+    "evidence": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 6 },
+    "limitations": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 5 },
+    "audience": { "type": "string" },
+    "why_now": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 8 }
+  },
+  "required": [
+    "paper_id", "recommend", "confidence", "overall_score", "relevance_score",
+    "content_quality_score", "novelty_score", "impact_score", "timeliness_score",
+    "evidence_quality_score", "verdict", "rejection_reason", "title_zh", "hook",
+    "summary", "contributions", "evidence", "limitations", "audience", "why_now", "tags"
+  ]
+}
+

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paper-collector"
+version = "0.1.0"
+description = "A daily, evidence-aware computer-science paper scout powered by Codex"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "pypdf>=5.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+paper-collector = "paper_collector.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paper_collector"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+

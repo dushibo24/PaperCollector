@@ -1,0 +1,271 @@
+[profile]
+# OpenAlex polite-pool 标识，也用于 Unpaywall；请改成你的真实邮箱。
+email = "you@example.com"
+
+[paths]
+data_dir = "data"
+
+[sources]
+recent_days = 45
+evergreen_years = 8
+per_interest_limit = 20
+# 可选。免费 key: https://www.semanticscholar.org/product/api
+semantic_scholar_api_key = "${SEMANTIC_SCHOLAR_API_KEY}"
+
+[agent]
+codex_bin = "codex"
+# 留空即使用你 Codex 配置中的默认模型。
+model = ""
+timeout_seconds = 900
+shortlist_size = 5
+max_deep_reviews = 3
+
+[translation]
+enabled = true
+pdf2zh_bin = "pdf2zh"
+# pdf2zh 支持的服务名；google 无需 key，但稳定性因网络环境而异。
+service = "google"
+threads = 4
+timeout_seconds = 3600
+
+[notify]
+# 默认：Server酱把导读和百度网盘链接推送到个人微信。
+channel = "serverchan"
+serverchan_sendkey = "${SERVERCHAN_SENDKEY}"
+# 备用企业微信配置；仅在 channel="wecom" 时使用。
+wecom_enabled = false
+wecom_webhook_key = "${WECOM_WEBHOOK_KEY}"
+
+[baidupan]
+# 第三方 CLI：https://github.com/qjfoidnh/BaiduPCS-Go
+bin = "BaiduPCS-Go"
+remote_dir = "/PaperCollector"
+# 0 为永久；默认一年，避免长期积累失效分享。
+share_period_days = 365
+# 留空时根据网盘路径生成稳定的四位提取码。
+share_password = ""
+timeout_seconds = 1800
+
+[quality]
+min_recommendation_score = 7.0
+# 名称匹配忽略大小写，既可写全称，也可写 OpenAlex 返回的常见简称。
+top_venues = [
+  # 人工智能、机器学习、视觉与自然语言处理
+  "NeurIPS", "Neural Information Processing Systems",
+  "ICML", "International Conference on Machine Learning",
+  "ICLR", "International Conference on Learning Representations",
+  "CVPR", "Conference on Computer Vision and Pattern Recognition",
+  "ICCV", "International Conference on Computer Vision",
+  "ECCV", "European Conference on Computer Vision",
+  "ACL", "Annual Meeting of the Association for Computational Linguistics",
+  "EMNLP", "Empirical Methods in Natural Language Processing",
+  "NAACL", "North American Chapter of the Association for Computational Linguistics",
+  "KDD", "ACM SIGKDD International Conference on Knowledge Discovery and Data Mining",
+  "SIGIR", "ACM SIGIR Conference on Research and Development in Information Retrieval",
+  "WWW", "The Web Conference",
+
+  # 系统与网络
+  "SOSP", "Symposium on Operating Systems Principles",
+  "OSDI", "USENIX Symposium on Operating Systems Design and Implementation",
+  "NSDI", "USENIX Symposium on Networked Systems Design and Implementation",
+  "SIGCOMM", "ACM SIGCOMM Conference",
+  "INFOCOM", "IEEE International Conference on Computer Communications",
+  "USENIX ATC", "USENIX Annual Technical Conference",
+  "EuroSys", "European Conference on Computer Systems",
+  "ToN", "IEEE/ACM Transactions on Networking", "Transactions on Networking",
+
+  # 安全、软件工程与数据管理
+  "USENIX Security", "USENIX Security Symposium",
+  "IEEE Symposium on Security and Privacy",
+  "CCS", "Conference on Computer and Communications Security",
+  "NDSS", "Network and Distributed System Security Symposium",
+  "PLDI", "Programming Language Design and Implementation",
+  "POPL", "Principles of Programming Languages",
+  "ICSE", "International Conference on Software Engineering",
+  "FSE", "Foundations of Software Engineering",
+  "SIGMOD", "ACM SIGMOD International Conference on Management of Data",
+  "VLDB", "International Conference on Very Large Data Bases",
+  "PVLDB", "Proceedings of the VLDB Endowment",
+]
+strong_venues = [
+  "AAAI", "AAAI Conference on Artificial Intelligence",
+  "IJCAI", "International Joint Conference on Artificial Intelligence",
+  "COLING", "International Conference on Computational Linguistics",
+  "WACV", "Winter Conference on Applications of Computer Vision",
+  "ACM Multimedia", "ACM International Conference on Multimedia",
+  "ICRA", "International Conference on Robotics and Automation",
+  "IROS", "International Conference on Intelligent Robots and Systems",
+  "CoRL", "Conference on Robot Learning",
+  "AISTATS", "Artificial Intelligence and Statistics",
+  "UAI", "Uncertainty in Artificial Intelligence",
+  "ECML PKDD", "European Conference on Machine Learning and Principles and Practice of Knowledge Discovery in Databases",
+
+  # 网络、安全与推荐系统中认可度较高的专业 venue
+  "CoNEXT", "Conference on Emerging Networking Experiments and Technologies",
+  "IMC", "Internet Measurement Conference",
+  "ICNP", "International Conference on Network Protocols",
+  "IWQoS", "International Workshop on Quality of Service",
+  "TDSC", "IEEE Transactions on Dependable and Secure Computing",
+  "TIFS", "IEEE Transactions on Information Forensics and Security",
+  "Computer Networks",
+  "RecSys", "ACM Conference on Recommender Systems",
+]
+
+# scope=niche：更看重内容本身，弱 venue 不会直接淘汰。
+[[interests]]
+name = "小同行：DDoS 测试、攻击与防御"
+description = "以 DDoS 测试方法为首要关注点，攻击与防御研究次之。重点关注攻击流量建模与可控生成、攻击重放、测试床与网络靶场、仿真和仿真—实网结合、测试场景及拓扑构造、背景流量和攻击强度编排，以及检测、缓解和系统抗毁能力的指标、基准与评测方法。尤其希望看到能提高测试真实性、可重复性、安全隔离性、可扩展性和覆盖度，或能系统暴露现有防御盲区的通用测试框架、工具、数据集与方法论。攻防方面继续关注大流量、应用层、低速隐蔽、反射放大、僵尸网络和自适应攻击，以及检测、归因、源地址验证、流量清洗和可编程网络防御。优先推荐具有真实流量或大规模实验、公开实现、明确威胁模型和部署价值的工作；警惕把普通压力测试包装成 DDoS 测试、只在小型合成数据上做常规模型分类、测试变量控制不清、指标单一、缺少强基线或无法复现的论文。"
+scope = "niche"
+weight = 1.3
+keywords = [
+  "DDoS testing", "DDoS testbed", "DDoS benchmarking", "DDoS evaluation",
+  "DDoS traffic generation", "DDoS attack emulation", "denial-of-service testing",
+  "DDoS attack replay", "DDoS experiment", "DDoS testing framework",
+  "DDoS resilience testing", "DDoS defense evaluation", "DDoS mitigation evaluation",
+  "DDoS detection benchmark", "DDoS dataset", "cyber range DDoS",
+  "realistic DDoS traffic", "reproducible DDoS experiment", "adversarial DDoS testing",
+  "distributed denial of service", "DDoS attack", "DDoS detection", "DDoS defense",
+  "DDoS mitigation", "denial-of-service attack", "volumetric attack",
+  "application-layer DDoS", "low-rate DDoS", "reflection amplification attack",
+  "botnet-based DDoS", "adaptive DDoS", "DDoS measurement", "DDoS traceback",
+  "DDoS filtering", "traffic scrubbing", "source address validation",
+]
+negative_keywords = [
+  "survey", "systematic literature review", "position paper",
+  "software unit testing", "GUI testing", "web performance testing",
+]
+
+# scope=niche：更看重内容本身，弱 venue 不会直接淘汰。
+[[interests]]
+name = "小同行：大语言模型在网络安全领域的应用"
+description = "关注大语言模型及其智能体在网络安全实务中的应用，包括漏洞发现与修复、恶意代码分析、威胁情报、安全日志分析、入侵调查、事件响应、自动化渗透测试、攻防演练和安全运营。优先推荐能与真实工具或环境闭环交互、采用可信安全基准或真实案例、系统评估幻觉与鲁棒性并相对专业基线取得实质提升的工作；排除仅把通用模型包装成安全聊天机器人、只做提示词比较或缺少可复现实验的论文。"
+scope = "niche"
+weight = 1.3
+keywords = [
+  "large language models for cybersecurity", "large language models for cyber security",
+  "LLM for cybersecurity", "cybersecurity agent", "LLM-based cybersecurity",
+  "large language model for cybersecurity", "large language model for cyber security",
+  "LLM security agent", "security operations agent",
+  "vulnerability detection", "vulnerability repair", "automated penetration testing",
+  "malware analysis", "threat intelligence", "security log analysis",
+  "intrusion investigation", "incident response", "attack investigation",
+  "CTF agent", "cyber range", "red team agent", "blue team agent",
+]
+negative_keywords = [
+  "jailbreak", "prompt injection defense", "language model alignment",
+  "survey", "systematic literature review", "position paper",
+]
+
+# scope=niche：最高时效优先级；弱 venue 和零引用不构成淘汰理由，重点判断是否可能形成新范式。
+[[interests]]
+name = "小同行：前沿模型架构与训练范式突破"
+description = "关注可能改变基础模型和智能体技术路线的原创架构、训练方法、后训练范式及推理时扩展方法。典型方向包括但不限于 Transformer 替代架构（如 Mamba 与状态空间模型、线性注意力）、稀疏与混合专家模型、扩散式或非自回归语言模型、世界模型，以及推理强化学习、可验证奖励、测试时计算、自改进 Agent、记忆和工具学习。最优先推荐提出新计算原语或新扩展规律、显著改善能力—效率—成本边界、解锁此前难以实现的能力，并可能快速产生后续工作的论文；一旦发现证据可信的类似突破，即使论文刚发布在 arXiv、尚未正式接收或没有引用，也应优先进入当天推荐。对于此类早期成果，重点核验作者或实验室的相关积累、方法完整性、缩放实验、强基线、公平算力比较、消融和可复现证据；排除旧模块重命名、简单拼接、只在小基准上微弱提升或依靠巨大额外算力制造优势的炒作性工作。"
+scope = "niche"
+weight = 1.3
+keywords = [
+  "novel model architecture", "foundation model architecture",
+  "reinforcement learning for reasoning", "state space language model",
+  "neural architecture", "new model architecture", "Mamba architecture",
+  "Mamba language model", "state space model",
+  "selective state space", "Transformer alternative", "linear attention",
+  "hybrid attention architecture", "mixture of experts", "sparse mixture of experts",
+  "mixture-of-experts", "test-time compute", "test time compute",
+  "test-time scaling", "inference-time scaling", "inference time scaling",
+  "reinforcement learning with verifiable rewards", "RLVR",
+  "group relative policy optimization", "GRPO", "process reward model",
+  "reasoning reinforcement learning", "reinforcement learning post-training",
+  "reasoning model", "diffusion language model", "autoregressive alternative",
+  "world model", "multimodal foundation model", "self-improving agent",
+  "agent learning", "agentic architecture", "tool learning",
+  "multi-agent learning", "long-context architecture", "memory-augmented model",
+]
+negative_keywords = [
+  "survey", "systematic literature review", "position paper",
+  "software architecture", "enterprise architecture", "building architecture",
+  "agent-based simulation",
+]
+
+# scope=broad：要求顶会/强影响力/强作者证据，普通 venue 的小修小补会被降权。
+[[interests]]
+name = "大同行：大语言模型在计算机网络领域的应用"
+description = "关注大语言模型及其智能体对计算机网络规划、配置、运维、诊断和优化的帮助，包括意图驱动网络、配置生成与验证、遥测分析、故障定位、路由与拥塞控制、无线与移动网络管理、数字孪生和自治网络。优先推荐在真实拓扑、仿真器或测试床中形成可验证闭环，能约束幻觉和错误操作，并相对传统优化、学习方法或规则系统有明确收益的工作；不希望推荐只给普通预测任务贴上 LLM 标签或没有网络领域实质创新的论文。"
+scope = "broad"
+weight = 1.0
+keywords = [
+  "large language models for networking", "large language models for communication networks",
+  "LLM-based network management", "LLM-based network configuration",
+  "large language model for networking", "LLM for networking", "LLM-based network",
+  "network management agent", "network automation agent",
+  "intent-based networking", "autonomous networking",
+  "network configuration generation", "network configuration verification",
+  "network troubleshooting", "network fault diagnosis", "network telemetry analysis",
+  "routing optimization", "congestion control agent", "wireless network optimization",
+  "mobile network management", "telecommunication foundation model",
+  "network digital twin", "self-driving network",
+]
+negative_keywords = [
+  "road network", "social network", "biological network", "jailbreak",
+  "survey", "systematic literature review", "position paper",
+]
+
+# scope=broad：要求顶会/强影响力/强作者证据，普通 venue 的小修小补会被降权。
+[[interests]]
+name = "大同行：大语言模型智能体与任务执行"
+description = "关注由大语言模型驱动的通用或垂直智能体，以及面向真实任务的执行框架，包括规划与推理、工具调用、记忆、环境反馈、多智能体协作、代码与软件工程智能体、网页和 GUI 操作、科研及工作流自动化。SWE-agent 一类能在可执行环境中完成并验证任务的系统尤其相关。优先推荐带来可泛化机制、可信评测或显著任务成功率提升的工作；排除只有提示链包装、挑选式案例演示、缺少消融和强基线，或仅换一个应用场景而没有方法贡献的论文。"
+scope = "broad"
+weight = 1.0
+keywords = [
+  "LLM agent", "LLM-based agent", "large language model agent", "agentic AI",
+  "large language model agents", "autonomous language agent",
+  "tool-using language model", "computer-use agent", "web agent", "GUI agent",
+  "coding agent", "software engineering agent", "SWE-agent", "workflow agent",
+  "scientific agent", "multi-agent collaboration", "agent planning", "agent reasoning",
+  "agent memory", "agent learning", "agent evaluation", "agent benchmark",
+]
+negative_keywords = [
+  "prompt-only", "opinion paper", "position paper", "survey",
+  "systematic literature review", "chatbot user study",
+]
+
+# scope=broad：要求顶会/强影响力/强作者证据，普通 venue 的小修小补会被降权。
+[[interests]]
+name = "大同行：网络流量模型的结构与训练"
+description = "关注面向网络报文、流、会话和时序行为的模型结构与训练方法，包括加密流量分类、流量生成与仿真、网络流量基础模型、自监督和对比学习、生成式与扩散模型、多模态融合、迁移学习、持续学习及强化学习。优先推荐在表示方式、训练目标、数据规模、跨数据集泛化或少样本迁移方面有实质创新，并使用公开强基线和严格消融验证的工作；排除只做常规特征工程、沿用旧骨干网络换数据集，或模型不变而仅强调某个应用场景的论文。"
+scope = "broad"
+weight = 1.0
+keywords = [
+  "network traffic classification", "encrypted traffic classification",
+  "network traffic generation", "traffic foundation model", "network traffic representation",
+  "packet-level model", "flow-level model", "session-level model", "traffic transformer",
+  "traffic language model", "self-supervised traffic learning", "contrastive traffic learning",
+  "multimodal network traffic", "traffic diffusion model", "flow generation model",
+  "few-shot traffic classification", "cross-domain traffic classification",
+  "continual traffic learning", "reinforcement learning for traffic analysis",
+]
+negative_keywords = [
+  "road traffic", "urban traffic", "vehicle trajectory", "pedestrian traffic",
+  "air traffic", "survey", "systematic literature review",
+]
+
+# scope=broad：要求顶会/强影响力/强作者证据，普通 venue 的小修小补会被降权。
+[[interests]]
+name = "大同行：推荐系统的最新进展"
+description = "关注推荐系统在召回、排序、重排序和端到端生成式推荐上的最新进展，包括序列与会话推荐、CTR/CVR 预估、推荐基础模型、LLM for Recommendation、多模态与图推荐、对话推荐，以及因果去偏、公平性、鲁棒性、效率和在线评测。优先推荐提出新任务范式或通用方法、在公开数据集上与强且调优公平的基线比较，并通过消融、跨域实验或线上 A/B 测试证明有效的工作；排除只做提示词包装、只在单一小数据集取得微弱提升，或没有个性化建模实质的领域应用。"
+scope = "broad"
+weight = 1.0
+keywords = [
+  "recommender system", "recommendation system", "personalized recommendation",
+  "sequential recommendation", "session-based recommendation", "generative recommendation",
+  "LLM-based recommendation", "large language model recommender",
+  "recommendation foundation model", "collaborative filtering", "CTR prediction",
+  "conversion rate prediction", "recommendation retrieval", "recommendation ranking",
+  "recommendation reranking", "multimodal recommendation", "graph recommendation",
+  "knowledge-aware recommendation", "causal recommendation", "debiasing recommendation",
+  "fair recommendation", "robust recommendation", "conversational recommendation",
+  "recommendation evaluation", "online recommendation", "user modeling",
+]
+negative_keywords = [
+  "clinical recommendation", "treatment recommendation", "drug recommendation",
+  "policy recommendation", "guideline recommendation", "survey",
+  "systematic literature review", "position paper",
+]
