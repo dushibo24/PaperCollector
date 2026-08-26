@@ -1,3 +1,6 @@
+import json
+import zipfile
+
 from test_db import make_review
 
 from paper_collector.models import Author, Paper
@@ -39,7 +42,8 @@ def test_serverchan_brief_contains_baidupan_link_and_password():
         "https://pan.baidu.com/s/abc?pwd=k9m2",
         "k9m2",
     )
-    assert "下载中英双语 PDF" in brief
+    assert "下载论文 ZIP" in brief
+    assert "英文原文、中英双语 PDF 和中文导读" in brief
     assert "pan.baidu.com" in brief
     assert "k9m2" in brief
 
@@ -64,9 +68,9 @@ def test_serverchan_delivery_persists_share_before_marking_delivered(config, tmp
             pass
 
         def publish(self, path):
-            assert path.name == "dual.pdf"
+            assert path.name == "paper.zip"
             return ShareLink(
-                "/PaperCollector/dual.pdf",
+                "/PaperCollector/paper.zip",
                 "https://pan.baidu.com/s/abc?pwd=k9m2",
                 "k9m2",
             )
@@ -80,14 +84,14 @@ def test_serverchan_delivery_persists_share_before_marking_delivered(config, tmp
 
     monkeypatch.setattr("paper_collector.pipeline.BaiduPCSGoPublisher", FakePublisher)
     monkeypatch.setattr("paper_collector.pipeline.ServerChanNotifier", FakeNotifier)
-    dual = tmp_path / "dual.pdf"
-    dual.write_bytes(b"%PDF-test")
+    package = tmp_path / "paper.zip"
+    package.write_bytes(b"PK-test")
     pipeline = Pipeline(config)
     try:
         pipeline.db.upsert_paper(paper)
         review = make_review(paper.id)
         pipeline.db.save_review(paper.id, review)
-        pipeline._deliver(paper, review, dual)
+        pipeline._deliver(paper, review, package)
         row = pipeline.db.work_row(paper.id)
         assert row["share_url"].startswith("https://pan.baidu.com/")
         assert row["status"] == "delivered"
@@ -135,5 +139,77 @@ def test_serverchan_retry_reuses_existing_share(config, tmp_path, monkeypatch):
         )
         pipeline._deliver(paper, review, tmp_path / "not-needed.pdf")
         assert pipeline.db.work_row(paper.id)["status"] == "delivered"
+    finally:
+        pipeline.close()
+
+
+def test_delivery_zip_contains_original_dual_and_brief(config, tmp_path):
+    paper = Paper(
+        id="doi:10.test/package",
+        title="Packaged Paper",
+        abstract="x",
+        authors=[Author("Ada")],
+        publication_date="2026-08-21",
+        year=2026,
+    )
+    original = tmp_path / "original.pdf"
+    dual = tmp_path / "dual.pdf"
+    brief = tmp_path / "brief.md"
+    original.write_bytes(b"%PDF-original")
+    dual.write_bytes(b"%PDF-dual")
+    brief.write_text("summary", encoding="utf-8")
+    pipeline = Pipeline(config)
+    try:
+        pipeline.db.upsert_paper(paper)
+        package = pipeline._create_delivery_zip(paper, make_review(paper.id), original, dual, brief)
+        with zipfile.ZipFile(package) as archive:
+            assert set(archive.namelist()) == {"论文原文.pdf", "中英双语.pdf", "中文导读.md"}
+        assert package.parent.parent.parent == config.knowledge_base_dir
+        assert pipeline.db.work_row(paper.id)["package_path"] == str(package)
+    finally:
+        pipeline.close()
+
+
+def test_queue_selection_penalizes_recently_repeated_topic(config):
+    recent = Paper(
+        id="recent",
+        title="DDoS Testing Framework",
+        abstract="x",
+        authors=[],
+        publication_date="2026-08-20",
+        year=2026,
+        matched_interests=["DDoS"],
+    )
+    repeated = Paper(
+        id="repeated",
+        title="Another DDoS Testing Framework",
+        abstract="x",
+        authors=[],
+        publication_date="2026-08-21",
+        year=2026,
+        matched_interests=["DDoS"],
+    )
+    different = Paper(
+        id="different",
+        title="Tool Using Language Agents",
+        abstract="x",
+        authors=[],
+        publication_date="2026-08-21",
+        year=2026,
+        matched_interests=["Agent"],
+    )
+    pipeline = Pipeline(config)
+    try:
+        for paper in (recent, repeated, different):
+            pipeline.db.upsert_paper(paper)
+            review = make_review(paper.id)
+            review.tags = ["DDoS testing"] if paper.id != "different" else ["LLM agent"]
+            pipeline.db.save_review(paper.id, review)
+        pipeline.db.mark_link_delivered(recent.id)
+
+        selected = pipeline._select_queued_delivery()
+
+        assert selected is not None
+        assert json.loads(selected["paper_json"])["id"] == different.id
     finally:
         pipeline.close()

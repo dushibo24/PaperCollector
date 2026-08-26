@@ -4,6 +4,8 @@ email = "you@example.com"
 
 [paths]
 data_dir = "data"
+# 已全文审读的原文、导读、后续双语 PDF 和 ZIP 都保存在这里。
+knowledge_base_dir = "data/knowledge_base"
 
 [sources]
 recent_days = 45
@@ -12,6 +14,36 @@ per_interest_limit = 20
 # 可选。免费 key: https://www.semanticscholar.org/product/api
 semantic_scholar_api_key = "${SEMANTIC_SCHOLAR_API_KEY}"
 
+# 会议/期刊官网优先发现最新论文；每个官网每次运行只抓一次，再在本地匹配所有兴趣。
+official_enabled = true
+# 抓当前年份及此前年份。2 表示覆盖本年和上一年。
+official_lookback_years = 2
+# 每个官网、每个兴趣方向最多送入统一候选池的论文数。
+official_per_source_limit = 20
+official_sources = [
+  # ICLR、TMLR；也兼容 OpenReview API 中采用相同 venueid 结构的论文。
+  "openreview",
+  # ICML、AISTATS、UAI、CoRL 的 PMLR 正式论文集。
+  "pmlr",
+  # ACL、EMNLP、NAACL、COLING / TACL 所在的 ACL Anthology。
+  "acl",
+  # CVPR、ICCV、WACV 的 CVF Open Access。
+  "cvf",
+  "neurips",
+  # USENIX Security、NSDI、OSDI、USENIX ATC。
+  "usenix",
+  "ndss",
+  "jmlr",
+  "pvldb",
+  # 以下两个只使用官方 API，未配置 key 时自动跳过。
+  "ieee",
+  "elsevier",
+]
+# 可选：用于 ToN、TDSC、TIFS、TNSM、TPAMI、TNNLS、TKDE、TSE、INFOCOM 等。
+ieee_xplore_api_key = "${IEEE_XPLORE_API_KEY}"
+# 可选：当前用于 Elsevier Scopus API 检索 Computer Networks。
+elsevier_api_key = "${ELSEVIER_API_KEY}"
+
 [agent]
 codex_bin = "codex"
 # 留空即使用你 Codex 配置中的默认模型。
@@ -19,12 +51,18 @@ model = ""
 timeout_seconds = 900
 shortlist_size = 5
 max_deep_reviews = 3
+# 选当天推送时参考最近 7 天，主题越重合降权越多，但不会覆盖论文质量门槛。
+diversity_history_days = 7
+diversity_penalty = 1.5
 
 [translation]
 enabled = true
 pdf2zh_bin = "pdf2zh"
-# pdf2zh 支持的服务名；google 无需 key，但稳定性因网络环境而异。
-service = "google"
+# pdf2zh 的 OpenAI 兼容接口；真实 API Key 建议通过 .env 提供。
+service = "openailiked"
+OPENAILIKED_BASE_URL = "${OPENAILIKED_BASE_URL}"
+OPENAILIKED_API_KEY = "${OPENAILIKED_API_KEY}"
+OPENAILIKED_MODEL = "${OPENAILIKED_MODEL}"
 threads = 4
 timeout_seconds = 3600
 
@@ -39,6 +77,9 @@ wecom_webhook_key = "${WECOM_WEBHOOK_KEY}"
 [baidupan]
 # 第三方 CLI：https://github.com/qjfoidnh/BaiduPCS-Go
 bin = "BaiduPCS-Go"
+# 若 CLI 尚未登录，doctor / 首次上传会用该 Cookie 自动登录并再次验证。
+# 可直接填写单行 Cookie；示例使用环境变量，避免公开仓库意外收录凭证。
+cookie = "${BAIDUPAN_COOKIE}"
 remote_dir = "/PaperCollector"
 # 0 为永久；默认一年，避免长期积累失效分享。
 share_period_days = 365

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -87,6 +88,17 @@ def translate_dual(pdf_path: Path, output_dir: Path, config: AppConfig) -> Path:
         raise PDFError(f"找不到 pdf2zh：{config.pdf2zh_bin}")
     output_dir.mkdir(parents=True, exist_ok=True)
     before = set(output_dir.glob("*.pdf"))
+    environment = os.environ.copy()
+    if config.translation_service == "openailiked":
+        openailiked = {
+            "OPENAILIKED_BASE_URL": config.translation_openailiked_base_url,
+            "OPENAILIKED_API_KEY": config.translation_openailiked_api_key,
+            "OPENAILIKED_MODEL": config.translation_openailiked_model,
+        }
+        missing = [name for name, value in openailiked.items() if not value]
+        if missing:
+            raise PDFError(f"OpenAI-liked 翻译配置缺失：{', '.join(missing)}")
+        environment.update({name: value for name, value in openailiked.items() if value})
     command = [
         config.pdf2zh_bin,
         str(pdf_path),
@@ -108,6 +120,7 @@ def translate_dual(pdf_path: Path, output_dir: Path, config: AppConfig) -> Path:
             capture_output=True,
             check=False,
             timeout=config.translation_timeout_seconds,
+            env=environment,
         )
     except subprocess.TimeoutExpired as exc:
         raise PDFError(f"pdf2zh 翻译超时（{config.translation_timeout_seconds}s）") from exc

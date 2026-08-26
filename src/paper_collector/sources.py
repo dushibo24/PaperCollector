@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, ClassVar
 
 from paper_collector.config import AppConfig, Interest
 from paper_collector.models import Author, Paper
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SourceError(RuntimeError):
@@ -221,9 +225,45 @@ class ArxivSource:
 
 class SemanticScholarEnricher:
     base_url = "https://api.semanticscholar.org/graph/v1/paper"
+    min_request_interval_seconds = 1.0
+    default_daily_request_limit = 30
 
-    def __init__(self, api_key: str | None):
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        daily_request_limit: int = default_daily_request_limit,
+        reserve_request: Callable[[], bool] | None = None,
+    ):
         self.api_key = api_key
+        self.daily_request_limit = daily_request_limit
+        self._reserve_request = reserve_request
+        self._quota_date: date | None = None
+        self._requests_today = 0
+        self._quota_warning_emitted = False
+        self._last_request_started_at: float | None = None
+
+    def _reserve_daily_quota(self) -> bool:
+        if self._reserve_request is not None:
+            return self._reserve_request()
+        today = datetime.now().astimezone().date()
+        if today != self._quota_date:
+            self._quota_date = today
+            self._requests_today = 0
+        if self._requests_today >= self.daily_request_limit:
+            return False
+        self._requests_today += 1
+        return True
+
+    def _wait_for_rate_limit(self) -> None:
+        now = time.monotonic()
+        if self._last_request_started_at is not None:
+            elapsed = now - self._last_request_started_at
+            delay = self.min_request_interval_seconds - elapsed
+            if delay > 0:
+                time.sleep(delay)
+                now += delay
+        self._last_request_started_at = now
 
     def enrich(self, paper: Paper) -> Paper:
         identifier = f"DOI:{paper.doi}" if paper.doi else paper.id.replace("arxiv:", "ARXIV:")
@@ -231,6 +271,16 @@ class SemanticScholarEnricher:
             return paper
         url = f"{self.base_url}/{urllib.parse.quote(identifier, safe=':')}?fields=citationCount,influentialCitationCount,openAccessPdf,url"
         headers = {"x-api-key": self.api_key} if self.api_key else {}
+        if not self._reserve_daily_quota():
+            if not self._quota_warning_emitted:
+                LOGGER.warning(
+                    "Semantic Scholar 当日请求额度已用尽（上限 %s），跳过后续补充",
+                    self.daily_request_limit,
+                )
+                self._quota_warning_emitted = True
+            return paper
+        self._quota_warning_emitted = False
+        self._wait_for_rate_limit()
         try:
             raw = _request_json(url, headers=headers)
         except SourceError:

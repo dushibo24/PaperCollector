@@ -72,6 +72,26 @@ def test_same_title_is_deduplicated_across_sources(tmp_path):
         db.close()
 
 
+def test_api_daily_quota_is_persisted_and_resets_on_a_new_date(tmp_path):
+    path = tmp_path / "state.sqlite3"
+    db = StateDB(path)
+    try:
+        assert db.reserve_api_request("semantic_scholar", 2, "2026-08-25") is True
+        assert db.reserve_api_request("semantic_scholar", 2, "2026-08-25") is True
+        assert db.reserve_api_request("semantic_scholar", 2, "2026-08-25") is False
+        assert db.api_request_count("semantic_scholar", "2026-08-25") == 2
+    finally:
+        db.close()
+
+    reopened = StateDB(path)
+    try:
+        assert reopened.reserve_api_request("semantic_scholar", 2, "2026-08-25") is False
+        assert reopened.reserve_api_request("semantic_scholar", 2, "2026-08-26") is True
+        assert reopened.api_request_count("semantic_scholar", "2026-08-26") == 1
+    finally:
+        reopened.close()
+
+
 def test_partial_delivery_is_resumable_without_duplicate_summary(tmp_path):
     db = StateDB(tmp_path / "state.sqlite3")
     try:
@@ -107,5 +127,30 @@ def test_baidupan_share_is_persisted_and_link_delivery_is_atomic(tmp_path):
         assert row["summary_delivered_at"] is not None
         assert row["file_delivered_at"] is not None
         assert row["status"] == "delivered"
+    finally:
+        db.close()
+
+
+def test_generated_package_is_resumed_before_other_queue_items(tmp_path):
+    db = StateDB(tmp_path / "state.sqlite3")
+    try:
+        first = make_paper("doi:10.test/first")
+        first.doi = "10.test/first"
+        first.title = "First paper"
+        second = make_paper("doi:10.test/second")
+        second.doi = "10.test/second"
+        second.title = "Second paper"
+        for paper in (first, second):
+            db.upsert_paper(paper)
+            db.save_review(paper.id, make_review(paper.id))
+        package = tmp_path / "first.zip"
+        package.write_bytes(b"PK-test")
+        db.save_artifacts(first.id, package_path=package)
+        db.set_status(first.id, "failed", "temporary notification failure")
+
+        row = db.inflight_delivery()
+
+        assert row is not None
+        assert row["id"] == first.id
     finally:
         db.close()

@@ -48,6 +48,7 @@ class StateDB:
                 original_pdf TEXT,
                 dual_pdf TEXT,
                 brief_path TEXT,
+                package_path TEXT,
                 baidupan_remote_path TEXT,
                 share_url TEXT,
                 share_password TEXT,
@@ -78,6 +79,13 @@ class StateDB:
                 FOREIGN KEY(run_id) REFERENCES runs(id),
                 FOREIGN KEY(work_id) REFERENCES works(id)
             );
+            CREATE TABLE IF NOT EXISTS api_daily_usage (
+                provider TEXT NOT NULL,
+                usage_date TEXT NOT NULL,
+                request_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider, usage_date)
+            );
             """
         )
         columns = {
@@ -89,6 +97,7 @@ class StateDB:
             "share_url": "TEXT",
             "share_password": "TEXT",
             "shared_at": "TEXT",
+            "package_path": "TEXT",
         }
         for name, column_type in migrations.items():
             if name not in columns:
@@ -143,6 +152,36 @@ class StateDB:
         )
         self.connection.commit()
 
+    def reserve_api_request(
+        self, provider: str, daily_limit: int, usage_date: str | None = None
+    ) -> bool:
+        """Atomically reserve one request from a provider's local-calendar daily quota."""
+        if daily_limit <= 0:
+            return False
+        usage_date = usage_date or datetime.now().astimezone().date().isoformat()
+        now = utc_now()
+        cursor = self.connection.execute(
+            """INSERT INTO api_daily_usage(
+                   provider, usage_date, request_count, updated_at
+               ) VALUES (?, ?, 1, ?)
+               ON CONFLICT(provider, usage_date) DO UPDATE SET
+                   request_count=request_count + 1,
+                   updated_at=excluded.updated_at
+               WHERE request_count < ?""",
+            (provider, usage_date, now, daily_limit),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def api_request_count(self, provider: str, usage_date: str | None = None) -> int:
+        usage_date = usage_date or datetime.now().astimezone().date().isoformat()
+        row = self.connection.execute(
+            """SELECT request_count FROM api_daily_usage
+               WHERE provider=? AND usage_date=?""",
+            (provider, usage_date),
+        ).fetchone()
+        return int(row["request_count"]) if row else 0
+
     def upsert_paper(self, paper: Paper) -> bool:
         existing = self.connection.execute(
             """SELECT id, status FROM works
@@ -183,6 +222,7 @@ class StateDB:
             """SELECT paper_json FROM works
                WHERE file_delivered_at IS NULL
                  AND status IN ('discovered', 'ranked', 'failed')
+                 AND review_json IS NULL
                  AND rejected_reason IS NULL
                ORDER BY updated_at DESC LIMIT ?""",
             (limit,),
@@ -196,6 +236,41 @@ class StateDB:
                  AND file_delivered_at IS NULL
                ORDER BY updated_at ASC LIMIT 1"""
         ).fetchone()
+
+    def inflight_delivery(self) -> sqlite3.Row | None:
+        """Return work whose delivery has already started and therefore must be resumed first."""
+        return self.connection.execute(
+            """SELECT * FROM works
+               WHERE review_json IS NOT NULL AND rejected_reason IS NULL
+                 AND file_delivered_at IS NULL
+                 AND (
+                     status IN ('translated', 'shared', 'delivering')
+                     OR package_path IS NOT NULL
+                     OR share_url IS NOT NULL
+                 )
+               ORDER BY updated_at ASC LIMIT 1"""
+        ).fetchone()
+
+    def queued_deliveries(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """SELECT * FROM works
+               WHERE review_json IS NOT NULL AND rejected_reason IS NULL
+                 AND file_delivered_at IS NULL
+                 AND status IN ('reviewed', 'failed')
+               ORDER BY updated_at ASC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+    def recent_deliveries(self, days: int = 7, limit: int = 50) -> list[sqlite3.Row]:
+        if days <= 0:
+            return []
+        return self.connection.execute(
+            """SELECT * FROM works
+               WHERE file_delivered_at IS NOT NULL
+                 AND datetime(file_delivered_at) >= datetime('now', ?)
+               ORDER BY file_delivered_at DESC LIMIT ?""",
+            (f"-{days} days", limit),
+        ).fetchall()
 
     def work_row(self, paper_id: str) -> sqlite3.Row:
         row = self.connection.execute("SELECT * FROM works WHERE id=?", (paper_id,)).fetchone()
@@ -239,16 +314,20 @@ class StateDB:
         original_pdf: Path | None = None,
         dual_pdf: Path | None = None,
         brief_path: Path | None = None,
+        package_path: Path | None = None,
     ) -> None:
         current = self.connection.execute(
-            "SELECT original_pdf, dual_pdf, brief_path FROM works WHERE id=?", (paper_id,)
+            "SELECT original_pdf, dual_pdf, brief_path, package_path FROM works WHERE id=?",
+            (paper_id,),
         ).fetchone()
         self.connection.execute(
-            """UPDATE works SET original_pdf=?, dual_pdf=?, brief_path=?, updated_at=? WHERE id=?""",
+            """UPDATE works SET original_pdf=?, dual_pdf=?, brief_path=?, package_path=?,
+                   updated_at=? WHERE id=?""",
             (
                 str(original_pdf) if original_pdf else current["original_pdf"],
                 str(dual_pdf) if dual_pdf else current["dual_pdf"],
                 str(brief_path) if brief_path else current["brief_path"],
+                str(package_path) if package_path else current["package_path"],
                 utc_now(),
                 paper_id,
             ),

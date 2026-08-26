@@ -3,7 +3,9 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import re
 import shutil
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import fields
@@ -15,6 +17,7 @@ from paper_collector.config import AppConfig
 from paper_collector.db import StateDB, normalized_title
 from paper_collector.models import Paper, Review
 from paper_collector.notifiers import NotifyError, ServerChanNotifier, WeComNotifier
+from paper_collector.official_sources import OfficialSources
 from paper_collector.pdf_tools import (
     PDFError,
     download_pdf,
@@ -131,10 +134,11 @@ def brief_for_serverchan(paper: Paper, review: Review, share_url: str, share_pas
 
 {limitations}
 
-## 下载中英双语 PDF
+## 下载论文 ZIP
 
 [打开百度网盘分享]({share_url})  
 提取码：`{share_password}`  
+ZIP 内含英文原文、中英双语 PDF 和中文导读。
 链接有效期以百度网盘页面显示为准。
 
 ---
@@ -150,10 +154,17 @@ class Pipeline:
     def __init__(self, config: AppConfig):
         self.config = config
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
+        self.config.knowledge_base_dir.mkdir(parents=True, exist_ok=True)
         self.db = StateDB(self.config.data_dir / "state.sqlite3")
         self.openalex = OpenAlexSource(config)
         self.arxiv = ArxivSource(config)
-        self.s2 = SemanticScholarEnricher(config.semantic_scholar_api_key)
+        self.official = OfficialSources(config)
+        self.s2 = SemanticScholarEnricher(
+            config.semantic_scholar_api_key,
+            reserve_request=lambda: self.db.reserve_api_request(
+                "semantic_scholar", SemanticScholarEnricher.default_daily_request_limit
+            ),
+        )
         self.agent = CodexAgent(config)
 
     def close(self) -> None:
@@ -163,6 +174,8 @@ class Pipeline:
         merged: dict[str, Paper] = {}
         ids_by_title: dict[str, str] = {}
         sources = [self.openalex, self.arxiv]
+        if self.config.official_enabled:
+            sources.append(self.official)
         for interest in self.config.interests:
             for source in sources:
                 try:
@@ -181,9 +194,39 @@ class Pipeline:
                         current.matched_interests = sorted(
                             set(current.matched_interests + paper.matched_interests)
                         )
-                        current.pdf_url = current.pdf_url or paper.pdf_url
-                        current.landing_url = current.landing_url or paper.landing_url
+                        incoming_is_official = paper.source.startswith("official:")
+                        if paper.abstract and len(paper.abstract) > len(current.abstract):
+                            current.abstract = paper.abstract
+                        if paper.doi:
+                            current.doi = current.doi or paper.doi
+                        if paper.authors and (
+                            not current.authors
+                            or (
+                                incoming_is_official
+                                and not any(author.openalex_id for author in current.authors)
+                            )
+                        ):
+                            current.authors = paper.authors
+                        if paper.venue and (incoming_is_official or not current.venue):
+                            current.venue = paper.venue
+                            current.venue_type = paper.venue_type or current.venue_type
+                        if paper.publication_date and (
+                            incoming_is_official or not current.publication_date
+                        ):
+                            current.publication_date = paper.publication_date
+                            current.year = paper.year
+                        if paper.pdf_url and (incoming_is_official or not current.pdf_url):
+                            current.pdf_url = paper.pdf_url
+                        if paper.landing_url and (incoming_is_official or not current.landing_url):
+                            current.landing_url = paper.landing_url
+                        if incoming_is_official:
+                            current.source = paper.source
                         current.cited_by_count = max(current.cited_by_count, paper.cited_by_count)
+                        current.influential_citation_count = max(
+                            current.influential_citation_count,
+                            paper.influential_citation_count,
+                        )
+                        current.concepts = list(dict.fromkeys(current.concepts + paper.concepts))
                     else:
                         merged[paper.id] = paper
                         ids_by_title[title_key] = paper.id
@@ -193,13 +236,66 @@ class Pipeline:
         self.db.event("discovered", run_id=run_id, detail=f"{len(papers)} unique works")
         return papers
 
+    @staticmethod
+    def _topic_signature(paper: Paper, review: Review) -> set[str]:
+        signature = {
+            f"interest:{item.casefold().strip()}"
+            for item in paper.matched_interests
+            if item.strip()
+        }
+        signature.update(f"tag:{item.casefold().strip()}" for item in review.tags if item.strip())
+        generic = {
+            "with",
+            "using",
+            "based",
+            "from",
+            "model",
+            "models",
+            "learning",
+            "system",
+            "systems",
+            "network",
+            "networks",
+            "paper",
+        }
+        signature.update(
+            f"title:{token}"
+            for token in re.findall(r"[a-z0-9][a-z0-9+.-]{2,}", paper.title.casefold())
+            if token not in generic
+        )
+        return signature
+
+    def _select_queued_delivery(self):
+        queued = self.db.queued_deliveries()
+        if not queued:
+            return None
+        recent_signatures: list[set[str]] = []
+        for row in self.db.recent_deliveries(self.config.diversity_history_days):
+            paper = Paper.from_dict(json.loads(row["paper_json"]))
+            review = Review.from_dict(json.loads(row["review_json"]))
+            recent_signatures.append(self._topic_signature(paper, review))
+
+        def selection_score(row) -> tuple[float, float]:
+            paper = Paper.from_dict(json.loads(row["paper_json"]))
+            review = Review.from_dict(json.loads(row["review_json"]))
+            signature = self._topic_signature(paper, review)
+            max_overlap = 0.0
+            for recent in recent_signatures:
+                union = signature | recent
+                if union:
+                    max_overlap = max(max_overlap, len(signature & recent) / len(union))
+            quality = review.overall_score + review.timeliness_score * 0.05
+            return quality - self.config.diversity_penalty * max_overlap, review.overall_score
+
+        return max(queued, key=selection_score)
+
     def _prepare_candidates(self) -> list[Paper]:
         papers = [score_paper(paper, self.config) for paper in self.db.eligible_papers()]
         papers.sort(key=lambda item: item.deterministic_score, reverse=True)
         enriched: list[Paper] = []
         for paper in papers[: max(20, self.config.shortlist_size * 4)]:
             paper = self.s2.enrich(paper)
-            if paper.source == "openalex":
+            if any(author.openalex_id for author in paper.authors):
                 paper = self.openalex.enrich_authors(paper)
             paper = score_paper(paper, self.config)
             self.db.upsert_paper(paper)
@@ -208,9 +304,36 @@ class Pipeline:
         return enriched
 
     def _artifact_dir(self, paper: Paper) -> Path:
-        return self.config.data_dir / "papers" / safe_stem(paper.id)
+        return self.config.knowledge_base_dir / "papers" / safe_stem(paper.id)
 
-    def _ensure_artifacts(self, paper: Paper, review: Review, row=None) -> tuple[Path, Path, Path]:
+    def _cache_review_summary(self, paper: Paper, review: Review) -> Path:
+        artifact_dir = self._artifact_dir(paper)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        brief = artifact_dir / "导读.md"
+        brief.write_text(render_brief(paper, review), encoding="utf-8")
+        self.db.save_artifacts(paper.id, brief_path=brief)
+        return brief
+
+    def _create_delivery_zip(
+        self, paper: Paper, review: Review, original: Path, dual: Path, brief: Path
+    ) -> Path:
+        artifact_dir = self._artifact_dir(paper)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        package = artifact_dir / (
+            f"{safe_stem(review.title_zh, 60)}-{safe_stem(paper.id, 18)}-论文包.zip"
+        )
+        temporary = package.with_suffix(".zip.tmp")
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(original, "论文原文.pdf")
+            archive.write(dual, "中英双语.pdf")
+            archive.write(brief, "中文导读.md")
+        temporary.replace(package)
+        self.db.save_artifacts(paper.id, package_path=package)
+        return package
+
+    def _ensure_artifacts(
+        self, paper: Paper, review: Review, row=None
+    ) -> tuple[Path, Path, Path, Path]:
         artifact_dir = self._artifact_dir(paper)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         original = Path(row["original_pdf"]) if row is not None and row["original_pdf"] else None
@@ -219,11 +342,9 @@ class Pipeline:
                 raise PDFError("没有可公开下载的 PDF URL")
             original = download_pdf(paper.pdf_url, artifact_dir / "original.pdf")
             self.db.save_artifacts(paper.id, original_pdf=original)
-        brief = (
-            Path(row["brief_path"])
-            if row is not None and row["brief_path"]
-            else artifact_dir / "brief.md"
-        )
+        brief = Path(row["brief_path"]) if row is not None and row["brief_path"] else None
+        if not brief or not brief.exists():
+            brief = artifact_dir / "导读.md"
         brief.write_text(render_brief(paper, review), encoding="utf-8")
         self.db.save_artifacts(paper.id, brief_path=brief)
         dual = Path(row["dual_pdf"]) if row is not None and row["dual_pdf"] else None
@@ -237,10 +358,13 @@ class Pipeline:
                 shutil.copy2(translated, friendly)
             dual = friendly
             self.db.save_artifacts(paper.id, dual_pdf=dual)
+        package = Path(row["package_path"]) if row is not None and row["package_path"] else None
+        if not package or not package.exists():
+            package = self._create_delivery_zip(paper, review, original, dual, brief)
         self.db.set_status(paper.id, "translated")
-        return original, dual, brief
+        return original, dual, brief, package
 
-    def _deliver(self, paper: Paper, review: Review, dual: Path, row=None) -> None:
+    def _deliver(self, paper: Paper, review: Review, package: Path, row=None) -> None:
         channel = self.config.notify_channel
         row = self.db.work_row(paper.id)
         if channel == "serverchan":
@@ -249,7 +373,7 @@ class Pipeline:
             share_url = row["share_url"]
             share_password = row["share_password"]
             if not share_url:
-                share = BaiduPCSGoPublisher(self.config).publish(dual)
+                share = BaiduPCSGoPublisher(self.config).publish(package)
                 self.db.save_share(paper.id, share.remote_path, share.url, share.password)
                 share_url = share.url
                 share_password = share.password
@@ -270,7 +394,7 @@ class Pipeline:
             if not summary_done:
                 notifier.send_markdown(brief_for_wecom(paper, review))
                 self.db.mark_summary_delivered(paper.id)
-            notifier.send_file(dual)
+            notifier.send_file(package)
             self.db.mark_file_delivered(paper.id)
             return
 
@@ -279,11 +403,11 @@ class Pipeline:
     def _resume_pending(self, row, *, no_notify: bool) -> str:
         paper = Paper.from_dict(json.loads(row["paper_json"]))
         review = Review.from_dict(json.loads(row["review_json"]))
-        _, dual, _ = self._ensure_artifacts(paper, review, row=row)
+        _, _, _, package = self._ensure_artifacts(paper, review, row=row)
         if no_notify:
-            LOGGER.info("待推送产物已准备：%s", dual)
+            LOGGER.info("待推送产物已准备：%s", package)
             return paper.id
-        self._deliver(paper, review, dual, row=row)
+        self._deliver(paper, review, package, row=row)
         return paper.id
 
     def run(self, *, dry_run: bool = False, no_notify: bool = False) -> str | None:
@@ -291,9 +415,9 @@ class Pipeline:
             run_id = self.db.start_run()
             selected_id: str | None = None
             try:
-                pending = self.db.pending_delivery()
-                if pending and not dry_run:
-                    selected_id = self._resume_pending(pending, no_notify=no_notify)
+                inflight = self.db.inflight_delivery()
+                if inflight and not dry_run:
+                    selected_id = self._resume_pending(inflight, no_notify=no_notify)
                     self.db.finish_run(
                         run_id, "prepared" if no_notify else "delivered", selected_id
                     )
@@ -301,12 +425,10 @@ class Pipeline:
 
                 self.discover(run_id)
                 candidates = self._prepare_candidates()
-                if not candidates:
-                    self.db.finish_run(run_id, "empty")
-                    return None
                 stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
                 run_dir = self.config.data_dir / "runs" / f"{run_id}-{stamp}"
-                ranked = self.agent.rank(candidates[:40], run_dir)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                ranked = self.agent.rank(candidates[:40], run_dir) if candidates else []
                 self.db.event(
                     "ranked", run_id=run_id, detail=json.dumps(ranked, ensure_ascii=False)
                 )
@@ -336,6 +458,7 @@ class Pipeline:
                         LOGGER.warning("审读 %s 失败：%s", paper.title, exc)
                         continue
                     self.db.save_review(paper.id, review)
+                    self._cache_review_summary(paper, review)
                     if (
                         not review.recommend
                         or review.overall_score < self.config.min_recommendation_score
@@ -347,16 +470,31 @@ class Pipeline:
                         self.db.reject(paper.id, reason)
                         self.db.event("rejected", run_id, paper.id, reason)
                         continue
-                    _, dual, _ = self._ensure_artifacts(paper, review)
-                    if no_notify:
-                        self.db.finish_run(run_id, "prepared", paper.id)
-                        return paper.id
-                    self._deliver(paper, review, dual)
-                    self.db.event("delivered", run_id, paper.id, str(dual))
-                    self.db.finish_run(run_id, "delivered", paper.id)
+                    self.db.event(
+                        "knowledge_cached",
+                        run_id,
+                        paper.id,
+                        str(self._artifact_dir(paper)),
+                    )
+
+                queued = self._select_queued_delivery()
+                if not queued:
+                    self.db.finish_run(
+                        run_id, "empty" if not candidates else "no-recommendation", selected_id
+                    )
+                    return None
+                paper = Paper.from_dict(json.loads(queued["paper_json"]))
+                review = Review.from_dict(json.loads(queued["review_json"]))
+                selected_id = paper.id
+                _, _, _, package = self._ensure_artifacts(paper, review, row=queued)
+                self.db.event("diversity_selected", run_id, paper.id, ", ".join(review.tags))
+                if no_notify:
+                    self.db.finish_run(run_id, "prepared", paper.id)
                     return paper.id
-                self.db.finish_run(run_id, "no-recommendation", selected_id)
-                return None
+                self._deliver(paper, review, package, row=queued)
+                self.db.event("delivered", run_id, paper.id, str(package))
+                self.db.finish_run(run_id, "delivered", paper.id)
+                return paper.id
             except Exception as exc:
                 if selected_id:
                     self.db.set_status(selected_id, "failed", str(exc))

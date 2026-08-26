@@ -60,6 +60,46 @@ def run_checks(config: AppConfig) -> list[Check]:
         ),
         Check(bool(config.interests), "兴趣配置", f"{len(config.interests)} 个方向"),
     ]
+    if config.official_enabled:
+        checks.extend(
+            [
+                Check(
+                    bool(config.official_sources),
+                    "会议/期刊官网",
+                    f"已启用 {len(config.official_sources)} 个适配器："
+                    + ", ".join(config.official_sources),
+                ),
+                Check(
+                    True,
+                    "IEEE Xplore API",
+                    "已配置" if config.ieee_xplore_api_key else "未配置（可选，运行时自动跳过）",
+                ),
+                Check(
+                    True,
+                    "Elsevier API",
+                    "已配置" if config.elsevier_api_key else "未配置（可选，运行时自动跳过）",
+                ),
+            ]
+        )
+    else:
+        checks.append(Check(True, "会议/期刊官网", "已禁用，仅使用聚合源"))
+    if config.translation_enabled and config.translation_service == "openailiked":
+        configured = all(
+            (
+                config.translation_openailiked_base_url,
+                config.translation_openailiked_api_key,
+                config.translation_openailiked_model,
+            )
+        )
+        checks.append(
+            Check(
+                configured,
+                "OpenAI-liked 翻译",
+                "Base URL、API Key、模型均已配置"
+                if configured
+                else "缺少 OPENAILIKED_BASE_URL / OPENAILIKED_API_KEY / OPENAILIKED_MODEL",
+            )
+        )
     if config.notify_channel == "serverchan":
         checks.append(
             Check(
@@ -70,8 +110,8 @@ def run_checks(config: AppConfig) -> list[Check]:
         )
         try:
             publisher = BaiduPCSGoPublisher(config)
-            logged_in, detail = publisher.check_login()
-            checks.append(Check(logged_in, "百度网盘", detail))
+            detail = publisher.ensure_login()
+            checks.append(Check(True, "百度网盘", detail))
         except PublishError as exc:
             checks.append(Check(False, "百度网盘", str(exc)))
     elif config.notify_channel == "wecom":

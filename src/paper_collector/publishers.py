@@ -59,7 +59,13 @@ class BaiduPCSGoPublisher:
         markers = ("失败", "未登录", "请登录", "error:", "panic:", "登录百度帐号")
         return any(marker.casefold() in lowered for marker in markers)
 
-    def _run(self, args: list[str], *, allow_failure: bool = False) -> str:
+    def _run(
+        self,
+        args: list[str],
+        *,
+        allow_failure: bool = False,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> str:
         try:
             completed = subprocess.run(
                 [self.executable, *args],
@@ -72,26 +78,49 @@ class BaiduPCSGoPublisher:
             raise PublishError(
                 f"BaiduPCS-Go 超时（{self.config.baidupcs_timeout_seconds}s）"
             ) from exc
-        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
-        failed = completed.returncode != 0 or self._failed(output)
+        raw_output = "\n".join(
+            part for part in (completed.stdout, completed.stderr) if part
+        ).strip()
+        failed = completed.returncode != 0 or self._failed(raw_output)
+        output = raw_output
+        for value in sensitive_values:
+            if value:
+                output = output.replace(value, "[redacted]")
         if failed and not allow_failure:
             raise PublishError(f"BaiduPCS-Go 执行失败：{output[-2000:]}")
         return output
 
     def check_login(self) -> tuple[bool, str]:
         output = self._run(["who"], allow_failure=True)
-        not_logged_in = bool(re.search(r"uid:\s*0(?:\D|$)", output)) or "用户名: ," in output
-        if not output or self._failed(output) or not_logged_in:
+        uid_match = re.search(r"uid:\s*(\d+)", output)
+        valid_uid = bool(uid_match and int(uid_match.group(1)) != 0)
+        if not output or self._failed(output) or not valid_uid:
             return False, output or "未检测到已登录账号"
         return True, output.splitlines()[0]
+
+    def ensure_login(self) -> str:
+        logged_in, detail = self.check_login()
+        if logged_in:
+            return detail
+        cookie = self.config.baidupcs_cookie
+        if not cookie:
+            raise PublishError("BaiduPCS-Go 尚未登录，且 config.toml 的 [baidupan].cookie 为空")
+        self._run(
+            ["login", f"-cookies={cookie}"],
+            sensitive_values=(cookie,),
+        )
+        logged_in, detail = self.check_login()
+        if not logged_in:
+            raise PublishError(f"使用 [baidupan].cookie 自动登录失败：{detail}")
+        return detail
 
     def publish(self, local_path: Path) -> ShareLink:
         if not local_path.is_file():
             raise PublishError(f"待上传文件不存在：{local_path}")
-        logged_in, detail = self.check_login()
-        if not logged_in:
-            raise PublishError(f"BaiduPCS-Go 尚未登录：{detail}")
-        remote_dir = "/" + self.config.baidupcs_remote_dir.strip("/")
+        if local_path.suffix.casefold() != ".zip":
+            raise PublishError("百度网盘只接受 PaperCollector 生成的 ZIP 推送包")
+        self.ensure_login()
+        remote_dir = self.config.baidupcs_remote_dir
         remote_path = posixpath.join(remote_dir, local_path.name)
         # mkdir reports an error when the directory already exists; upload verification is authoritative.
         self._run(["mkdir", remote_dir], allow_failure=True)
