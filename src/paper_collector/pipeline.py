@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from paper_collector.codex_agent import AgentError, CodexAgent
 from paper_collector.config import AppConfig
@@ -26,6 +27,7 @@ from paper_collector.pdf_tools import (
     translate_dual,
 )
 from paper_collector.publishers import BaiduPCSGoPublisher
+from paper_collector.reading_notes import PUBLIC_FILENAME, ReadingNotes
 from paper_collector.scoring import score_paper
 from paper_collector.sources import (
     ArxivSource,
@@ -97,10 +99,10 @@ def render_brief(paper: Paper, review: Review) -> str:
 """
 
 
-def brief_for_wecom(paper: Paper, review: Review) -> str:
+def brief_for_wecom(paper: Paper, review: Review, note_url: str = "") -> str:
     contributions = "\n".join(f"> • {item}" for item in review.contributions[:3])
     limitations = "；".join(review.limitations[:2])
-    return f"""## 今日论文｜{review.title_zh}
+    content = f"""## 今日论文｜{review.title_zh}
 > **{review.hook}**
 
 {review.summary}
@@ -110,9 +112,23 @@ def brief_for_wecom(paper: Paper, review: Review) -> str:
 
 **冷静看**：{limitations}
 <font color=\"info\">推荐 {review.overall_score:.1f}/10 · {paper.venue or "预印本"} · {paper.publication_date}</font>"""
+    suffix = note_link(note_url)
+    if suffix:
+        budget = 4096 - len(suffix.encode("utf-8")) - len("…".encode())
+        if budget < 0:
+            raise NotifyError("阅读笔记链接超过企业微信消息长度限制")
+        if len((content + suffix).encode("utf-8")) > 4096:
+            content = content.encode("utf-8")[:budget].decode("utf-8", errors="ignore") + "…"
+    return content + suffix
 
 
-def brief_for_serverchan(paper: Paper, review: Review, share_url: str, share_password: str) -> str:
+def note_link(url: str) -> str:
+    return f"\n\n---\n\n📖 [阅读完整笔记（HTML）]({url})\n" if url else ""
+
+
+def brief_for_serverchan(
+    paper: Paper, review: Review, share_url: str, share_password: str, note_url: str = ""
+) -> str:
     contributions = "\n".join(f"- {item}" for item in review.contributions[:4])
     evidence = "\n".join(f"- {item}" for item in review.evidence[:4])
     limitations = "\n".join(f"- {item}" for item in review.limitations[:3])
@@ -147,7 +163,7 @@ ZIP 内含英文原文、中英双语 PDF 和中文导读。
 发表：{paper.venue or "预印本"} · {paper.publication_date}  
 推荐分：{review.overall_score:.1f}/10  
 [论文原始页面]({paper.landing_url or paper.pdf_url or share_url})
-"""
+""" + note_link(note_url)
 
 
 class Pipeline:
@@ -315,7 +331,8 @@ class Pipeline:
         return brief
 
     def _create_delivery_zip(
-        self, paper: Paper, review: Review, original: Path, dual: Path, brief: Path
+        self, paper: Paper, review: Review, original: Path, dual: Path, brief: Path,
+        reading_note: Path | None = None,
     ) -> Path:
         artifact_dir = self._artifact_dir(paper)
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -327,9 +344,37 @@ class Pipeline:
             archive.write(original, "论文原文.pdf")
             archive.write(dual, "中英双语.pdf")
             archive.write(brief, "中文导读.md")
+            if reading_note:
+                archive.write(reading_note, "阅读笔记.html")
         temporary.replace(package)
         self.db.save_artifacts(paper.id, package_path=package)
         return package
+
+    def _ensure_reading_note(self, paper: Paper, review: Review, original: Path) -> Path:
+        path, url = ReadingNotes(self.config, self.agent).ensure(
+            paper, review, original, self._artifact_dir(paper)
+        )
+        self.db.save_reading_note(paper.id, path, url)
+        self.db.event("reading_note_published", work_id=paper.id, detail=url)
+        return path
+
+    def write_reading_note(self, paper_id: str) -> str:
+        if not self.config.reading_notes_enabled:
+            raise RuntimeError("请先启用 reading_notes.enabled 并配置 public_base_url")
+        with single_instance(self.config.data_dir / "paper-collector.lock"):
+            row = self.db.work_row(paper_id)
+            if row is None or not row["review_json"]:
+                raise RuntimeError("未找到这篇论文的全文审读记录，请先运行论文筛选")
+            paper = Paper.from_dict(json.loads(row["paper_json"]))
+            review = Review.from_dict(json.loads(row["review_json"]))
+            original = Path(row["original_pdf"]) if row["original_pdf"] else None
+            if not original or not original.exists():
+                if not paper.pdf_url:
+                    raise PDFError("没有可公开下载的 PDF URL")
+                original = download_pdf(paper.pdf_url, self._artifact_dir(paper) / "original.pdf")
+                self.db.save_artifacts(paper.id, original_pdf=original)
+            self._ensure_reading_note(paper, review, original)
+            return self.db.work_row(paper.id)["reading_note_url"]
 
     def _ensure_artifacts(
         self, paper: Paper, review: Review, row=None
@@ -358,15 +403,32 @@ class Pipeline:
                 shutil.copy2(translated, friendly)
             dual = friendly
             self.db.save_artifacts(paper.id, dual_pdf=dual)
+        reading_note = (
+            self._ensure_reading_note(paper, review, original)
+            if self.config.reading_notes_enabled else None
+        )
         package = Path(row["package_path"]) if row is not None and row["package_path"] else None
-        if not package or not package.exists():
-            package = self._create_delivery_zip(paper, review, original, dual, brief)
+        if not package or not package.exists() or reading_note:
+            package = self._create_delivery_zip(paper, review, original, dual, brief, reading_note)
         self.db.set_status(paper.id, "translated")
         return original, dual, brief, package
 
     def _deliver(self, paper: Paper, review: Review, package: Path, row=None) -> None:
         channel = self.config.notify_channel
         row = self.db.work_row(paper.id)
+        note_url = ""
+        if self.config.reading_notes_enabled:
+            note_url = row["reading_note_url"]
+            filename = Path(urlsplit(note_url or "").path).name
+            if (
+                not note_url
+                or not PUBLIC_FILENAME.fullmatch(filename)
+                or note_url != f"{self.config.reading_notes_base_url}/notes/{filename}"
+                or not row["reading_note_path"]
+                or not Path(row["reading_note_path"]).is_file()
+                or not (self.config.reading_notes_dir / "notes" / filename).is_file()
+            ):
+                raise NotifyError("阅读笔记尚未成功发布，保留状态等待重试，不发送缺失笔记的推送")
         if channel == "serverchan":
             if not self.config.serverchan_sendkey:
                 raise NotifyError("缺少 SERVERCHAN_SENDKEY；产物已生成但未推送")
@@ -379,7 +441,7 @@ class Pipeline:
                 share_password = share.password
             ServerChanNotifier(self.config.serverchan_sendkey).send(
                 f"今日论文｜{review.title_zh}",
-                brief_for_serverchan(paper, review, share_url, share_password or ""),
+                brief_for_serverchan(paper, review, share_url, share_password or "", note_url),
             )
             self.db.mark_link_delivered(paper.id)
             return
@@ -392,7 +454,7 @@ class Pipeline:
             notifier = WeComNotifier(self.config.wecom_webhook_key)
             summary_done = bool(row["summary_delivered_at"])
             if not summary_done:
-                notifier.send_markdown(brief_for_wecom(paper, review))
+                notifier.send_markdown(brief_for_wecom(paper, review, note_url))
                 self.db.mark_summary_delivered(paper.id)
             notifier.send_file(package)
             self.db.mark_file_delivered(paper.id)

@@ -98,6 +98,8 @@ class StateDB:
             "share_password": "TEXT",
             "shared_at": "TEXT",
             "package_path": "TEXT",
+            "reading_note_path": "TEXT",
+            "reading_note_url": "TEXT",
         }
         for name, column_type in migrations.items():
             if name not in columns:
@@ -331,6 +333,13 @@ class StateDB:
                 utc_now(),
                 paper_id,
             ),
+        )
+        self.connection.commit()
+
+    def save_reading_note(self, paper_id: str, path: Path, url: str) -> None:
+        self.connection.execute(
+            "UPDATE works SET reading_note_path=?, reading_note_url=?, updated_at=? WHERE id=?",
+            (str(path), url, utc_now(), paper_id),
         )
         self.connection.commit()
 

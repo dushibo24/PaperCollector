@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 
 class ConfigError(ValueError):
@@ -65,8 +67,25 @@ class AppConfig:
     official_lookback_years: int
     official_per_source_limit: int
     official_sources: list[str]
+    openreview_username: str | None
+    openreview_password: str | None
+    openreview_access_token: str | None
     ieee_xplore_api_key: str | None
     elsevier_api_key: str | None
+    reading_notes_enabled: bool = False
+    reading_notes_base_url: str = ""
+    reading_notes_host: str = "127.0.0.1"
+    reading_notes_port: int = 8765
+    reading_notes_timeout_seconds: int = 1800
+    reading_notes_min_chars: int = 30000
+    reading_notes_publish_ssh_host: str = ""
+    reading_notes_publish_ssh_directory: str = ""
+    reading_notes_publish_ssh_port: int | None = None
+    reading_notes_publish_timeout_seconds: int = 180
+
+    @property
+    def reading_notes_dir(self) -> Path:
+        return self.data_dir / "public_notes"
 
 
 def _need(table: dict[str, Any], key: str, context: str) -> Any:
@@ -118,6 +137,7 @@ def load_config(path: str | Path) -> AppConfig:
     agent = raw.get("agent", {})
     translation = raw.get("translation", {})
     notify = raw.get("notify", {})
+    reading_notes = raw.get("reading_notes", {})
     paths = raw.get("paths", {})
     interests_raw = raw.get("interests", [])
     if not interests_raw:
@@ -205,6 +225,19 @@ def load_config(path: str | Path) -> AppConfig:
         )
     official_lookback_years = int(sources.get("official_lookback_years", 2))
     official_per_source_limit = int(sources.get("official_per_source_limit", 20))
+    openreview_username = _expand_env(
+        sources.get("openreview_username", "${OPENREVIEW_USERNAME}")
+    )
+    openreview_password = _expand_env(
+        sources.get("openreview_password", "${OPENREVIEW_PASSWORD}")
+    )
+    openreview_access_token = _expand_env(
+        sources.get("openreview_access_token", "${OPENREVIEW_ACCESS_TOKEN}")
+    )
+    if bool(openreview_username) != bool(openreview_password):
+        raise ConfigError(
+            "OpenReview 账号密码必须成对配置：OPENREVIEW_USERNAME / OPENREVIEW_PASSWORD"
+        )
     if official_lookback_years < 1:
         raise ConfigError("sources.official_lookback_years 必须至少为 1")
     if official_per_source_limit < 1:
@@ -229,6 +262,60 @@ def load_config(path: str | Path) -> AppConfig:
         translation.get("OPENAILIKED_API_KEY", "${OPENAILIKED_API_KEY}")
     )
     openailiked_model = _expand_env(translation.get("OPENAILIKED_MODEL", "${OPENAILIKED_MODEL}"))
+
+    notes_enabled = bool(reading_notes.get("enabled", False))
+    notes_base_url = (
+        _expand_env(reading_notes.get("public_base_url", "${READING_NOTES_BASE_URL}")) or ""
+    ).rstrip("/")
+    try:
+        notes_url = urlsplit(notes_base_url)
+        notes_url_port = notes_url.port
+    except ValueError as exc:
+        raise ConfigError("reading_notes.public_base_url 的地址或端口无效") from exc
+    if notes_base_url and (
+        notes_url.scheme not in {"http", "https"}
+        or not notes_url.hostname
+        or notes_url_port == 0
+        or notes_url.username is not None
+        or notes_url.password is not None
+        or notes_url.query
+        or notes_url.fragment
+        or any(character.isspace() or character in '<>"`[]()' for character in notes_base_url)
+        or any(part in {".", ".."} for part in unquote(notes_url.path).split("/"))
+    ):
+        raise ConfigError("reading_notes.public_base_url 必须是无账号、查询参数的 HTTP(S) 地址")
+    if notes_enabled and not notes_base_url:
+        raise ConfigError("启用阅读笔记需要配置 reading_notes.public_base_url / READING_NOTES_BASE_URL")
+    notes_port = int(reading_notes.get("port", 8765))
+    notes_timeout = int(reading_notes.get("timeout_seconds", 1800))
+    notes_min_chars = int(reading_notes.get("min_chars", 30000))
+    if not 1 <= notes_port <= 65535:
+        raise ConfigError("reading_notes.port 必须在 1 到 65535 之间")
+    if notes_timeout <= 0 or not 1000 <= notes_min_chars <= 80000:
+        raise ConfigError("阅读笔记 timeout_seconds 必须为正数，min_chars 必须在 1000 到 80000 之间")
+    notes_ssh_host = str(reading_notes.get("publish_ssh_host", ""))
+    notes_ssh_directory = str(reading_notes.get("publish_ssh_directory", ""))
+    notes_ssh_port = reading_notes.get("publish_ssh_port")
+    notes_publish_timeout = int(reading_notes.get("publish_timeout_seconds", 180))
+    if bool(notes_ssh_host) != bool(notes_ssh_directory):
+        raise ConfigError("publish_ssh_host 和 publish_ssh_directory 必须同时配置")
+    if notes_ssh_host and not re.fullmatch(
+        r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*", notes_ssh_host
+    ):
+        raise ConfigError("publish_ssh_host 必须是 SSH 主机别名或 user@hostname")
+    if notes_ssh_directory and (
+        not notes_ssh_directory.startswith("/")
+        or not notes_ssh_directory.strip("/")
+        or any(part in {".", ".."} for part in notes_ssh_directory.split("/"))
+        or any(ord(character) < 32 for character in notes_ssh_directory)
+    ):
+        raise ConfigError("publish_ssh_directory 必须是独立的绝对目录，不能包含父目录跳转")
+    if notes_ssh_port is not None:
+        notes_ssh_port = int(notes_ssh_port)
+        if not 1 <= notes_ssh_port <= 65535:
+            raise ConfigError("publish_ssh_port 必须在 1 到 65535 之间")
+    if notes_publish_timeout <= 0:
+        raise ConfigError("publish_timeout_seconds 必须为正数")
 
     return AppConfig(
         path=config_path,
@@ -258,6 +345,16 @@ def load_config(path: str | Path) -> AppConfig:
         translation_openailiked_model=openailiked_model or None,
         translation_threads=int(translation.get("threads", 4)),
         translation_timeout_seconds=int(translation.get("timeout_seconds", 3600)),
+        reading_notes_enabled=notes_enabled,
+        reading_notes_base_url=notes_base_url,
+        reading_notes_host=str(reading_notes.get("host", "127.0.0.1")),
+        reading_notes_port=notes_port,
+        reading_notes_timeout_seconds=notes_timeout,
+        reading_notes_min_chars=notes_min_chars,
+        reading_notes_publish_ssh_host=notes_ssh_host,
+        reading_notes_publish_ssh_directory=notes_ssh_directory,
+        reading_notes_publish_ssh_port=notes_ssh_port,
+        reading_notes_publish_timeout_seconds=notes_publish_timeout,
         notify_channel=notify_channel,
         serverchan_sendkey=serverchan_sendkey,
         wecom_webhook_key=webhook_key,
@@ -273,6 +370,9 @@ def load_config(path: str | Path) -> AppConfig:
         official_lookback_years=official_lookback_years,
         official_per_source_limit=official_per_source_limit,
         official_sources=official_sources,
+        openreview_username=openreview_username or None,
+        openreview_password=openreview_password or None,
+        openreview_access_token=openreview_access_token or None,
         ieee_xplore_api_key=_expand_env(
             sources.get("ieee_xplore_api_key", "${IEEE_XPLORE_API_KEY}")
         ),

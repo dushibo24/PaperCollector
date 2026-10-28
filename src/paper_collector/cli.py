@@ -9,6 +9,7 @@ from pathlib import Path
 from paper_collector import __version__
 from paper_collector.config import ConfigError, load_config
 from paper_collector.doctor import run_checks
+from paper_collector.notes_server import serve_notes
 from paper_collector.pipeline import Pipeline
 from paper_collector.scheduler import install_launchd, uninstall_launchd
 
@@ -37,6 +38,12 @@ def _parser() -> argparse.ArgumentParser:
             )
             item.add_argument("--no-notify", action="store_true", help="生成全部产物，但不发送微信")
 
+    notes_server = sub.add_parser("serve-notes", help="仅提供已发布阅读笔记的 HTTP 服务")
+    notes_server.add_argument("--config", default="config.toml")
+    write_note = sub.add_parser("write-note", help="为已深读的论文补写 HTML 笔记，不发送通知")
+    write_note.add_argument("paper_id")
+    write_note.add_argument("--config", default="config.toml")
+
     schedule = sub.add_parser("schedule", help="管理 macOS 每日定时任务")
     schedule.add_argument("action", choices=["install", "uninstall"])
     schedule.add_argument("--config", default="config.toml")
@@ -63,6 +70,9 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         config = load_config(args.config)
+        if args.command == "serve-notes":
+            serve_notes(config)
+            return
         if args.command == "doctor":
             checks = run_checks(config)
             for check in checks:
@@ -94,6 +104,8 @@ def main(argv: list[str] | None = None) -> None:
                     print(f"本次处理：{selected}")
                 else:
                     print("本次没有达到推荐门槛的论文。")
+            elif args.command == "write-note":
+                print(f"阅读笔记：{pipeline.write_reading_note(args.paper_id)}")
         finally:
             pipeline.close()
     except (ConfigError, RuntimeError, OSError) as exc:

@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,12 +51,23 @@ def _request_text(url: str, *, headers: dict[str, str] | None = None, timeout: i
             **(headers or {}),
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            return response.read().decode(charset, errors="replace")
-    except (urllib.error.URLError, TimeoutError, UnicodeError) as exc:
-        raise SourceError(f"请求失败 {_redact_url(url)}: {exc}") from exc
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                break
+            time.sleep(min(10.0, 2**attempt))
+        except (urllib.error.URLError, TimeoutError, UnicodeError) as exc:
+            last = exc
+            if attempt == 2:
+                break
+            time.sleep(2**attempt)
+    raise SourceError(f"请求失败 {_redact_url(url)}: {last}") from last
 
 
 def _request_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = 30) -> Any:
@@ -240,7 +252,7 @@ class _Adapter:
         try:
             return self.request_text(url, **kwargs)
         except SourceError as exc:
-            LOGGER.info("官网入口暂不可用，跳过 %s: %s", url, exc)
+            LOGGER.info("官网详情页暂不可用，跳过补充内容 %s: %s", url, exc)
             return None
 
     def candidate(self, title: str, year: int, venue: str, **kwargs: Any) -> Paper:
@@ -264,22 +276,77 @@ class OpenReviewAdapter(_Adapter):
     name = "openreview"
     base_url = "https://api2.openreview.net/notes"
 
+    def __init__(
+        self,
+        config: AppConfig,
+        request_text: RequestText = _request_text,
+        request_json: RequestJSON = _request_json,
+        client_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        super().__init__(config, request_text=request_text, request_json=request_json)
+        self.client_factory = client_factory
+        self._client: Any | None = None
+
+    @property
+    def authenticated(self) -> bool:
+        return bool(
+            self.config.openreview_access_token
+            or (self.config.openreview_username and self.config.openreview_password)
+        )
+
+    def _authenticated_notes(self, venue_id: str) -> list[dict[str, Any]]:
+        try:
+            if self._client is None:
+                if self.client_factory is None:
+                    import openreview
+
+                    self.client_factory = openreview.api.OpenReviewClient
+                kwargs: dict[str, Any] = {"baseurl": "https://api2.openreview.net"}
+                if self.config.openreview_access_token:
+                    kwargs["token"] = self.config.openreview_access_token
+                else:
+                    kwargs.update(
+                        username=self.config.openreview_username,
+                        password=self.config.openreview_password,
+                    )
+                self._client = self.client_factory(**kwargs)
+            notes = self._client.get_all_notes(content={"venueid": venue_id})
+            return [note.to_json() if hasattr(note, "to_json") else note for note in notes]
+        except Exception as exc:
+            detail = str(exc)
+            for secret in (
+                self.config.openreview_username,
+                self.config.openreview_password,
+                self.config.openreview_access_token,
+            ):
+                if secret:
+                    detail = detail.replace(secret, "***")
+            raise SourceError(
+                f"OpenReview 登录或认证请求失败：{type(exc).__name__}: {detail}"
+            ) from exc
+
     def fetch(self) -> list[Paper]:
         venue_ids = [f"ICLR.cc/{year}/Conference" for year in self.years]
         venue_ids.append("TMLR")
         result: dict[str, Paper] = {}
         page_size = 1000
         for venue_id in venue_ids:
-            for offset in range(0, 5000, page_size):
-                query = urllib.parse.urlencode(
-                    {"content.venueid": venue_id, "limit": page_size, "offset": offset}
-                )
+            offsets: list[int | None] = [None] if self.authenticated else list(
+                range(0, 5000, page_size)
+            )
+            for offset in offsets:
                 try:
-                    payload = self.request_json(f"{self.base_url}?{query}")
+                    if offset is None:
+                        notes = self._authenticated_notes(venue_id)
+                    else:
+                        query = urllib.parse.urlencode(
+                            {"content.venueid": venue_id, "limit": page_size, "offset": offset}
+                        )
+                        payload = self.request_json(f"{self.base_url}?{query}")
+                        notes = payload.get("notes", [])
                 except SourceError as exc:
                     LOGGER.info("OpenReview %s 暂不可用：%s", venue_id, exc)
                     break
-                notes = payload.get("notes", [])
                 for note in notes:
                     content = note.get("content") or {}
                     title = str(_content_value(content.get("title")) or "").strip()
@@ -319,7 +386,7 @@ class OpenReviewAdapter(_Adapter):
                         source=f"official:{self.name}",
                     )
                     result[paper.id] = paper
-                if len(notes) < page_size:
+                if offset is None or len(notes) < page_size:
                     break
         return list(result.values())
 

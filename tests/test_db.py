@@ -56,6 +56,27 @@ def test_doi_upsert_deduplicates_and_preserves_primary_id(tmp_path):
         db.close()
 
 
+def test_reading_note_fields_survive_reopening_database_without_changing_delivery_state(tmp_path):
+    path = tmp_path / "state.sqlite3"
+    db = StateDB(path)
+    paper = make_paper()
+    db.upsert_paper(paper)
+    db.save_review(paper.id, make_review(paper.id))
+    db.mark_link_delivered(paper.id)
+    note_path = tmp_path / "reading-note.html"
+    db.save_reading_note(paper.id, note_path, "http://198.51.100.25:8765/notes/test.html")
+    db.close()
+    db = StateDB(path)
+    try:
+        row = db.work_row(paper.id)
+        assert row["reading_note_path"] == str(note_path)
+        assert row["reading_note_url"].endswith("test.html")
+        assert row["status"] == "delivered"
+        assert row["file_delivered_at"] is not None
+    finally:
+        db.close()
+
+
 def test_same_title_is_deduplicated_across_sources(tmp_path):
     db = StateDB(tmp_path / "state.sqlite3")
     try:

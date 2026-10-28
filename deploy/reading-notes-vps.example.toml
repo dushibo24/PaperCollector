@@ -1,0 +1,11 @@
+[reading_notes]
+enabled = true
+public_base_url = "https://82.156.88.52/paper-notes"
+host = "127.0.0.1"
+port = 8765
+timeout_seconds = 1800
+min_chars = 30000
+publish_ssh_host = "ubuntu@82.156.88.52"
+publish_ssh_directory = "/home/ubuntu/paper-collector-notes/public"
+publish_ssh_port = 22
+publish_timeout_seconds = 180

@@ -32,11 +32,27 @@ def _request_json(url: str, *, headers: dict[str, str] | None = None, timeout: i
             **(headers or {}),
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise SourceError(f"请求失败 {url}: {exc}") from exc
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                break
+            retry_after = exc.headers.get("Retry-After")
+            try:
+                delay = min(10.0, max(0.5, float(retry_after))) if retry_after else 2**attempt
+            except ValueError:
+                delay = 2**attempt
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last = exc
+            if attempt == 2:
+                break
+            time.sleep(2**attempt)
+    raise SourceError(f"请求失败 {url}: {last}") from last
 
 
 def _abstract_from_inverted(index: dict[str, list[int]] | None) -> str:
