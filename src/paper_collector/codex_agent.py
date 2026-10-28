@@ -17,7 +17,15 @@ class CodexAgent:
     def __init__(self, config: AppConfig):
         self.config = config
 
-    def _run(self, prompt: str, schema: Path, output: Path) -> dict[str, Any]:
+    def _run(
+        self,
+        prompt: str,
+        schema: Path,
+        output: Path,
+        *,
+        images: list[Path] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
         output.parent.mkdir(parents=True, exist_ok=True)
         command = [
             self.config.codex_bin,
@@ -39,20 +47,23 @@ class CodexAgent:
         ]
         if self.config.codex_model:
             command.extend(["--model", self.config.codex_model])
+        for image in images or []:
+            command.extend(["--image", str(image.resolve())])
         command.append("-")
+        timeout = timeout_seconds or self.config.codex_timeout_seconds
         try:
             completed = subprocess.run(
                 command,
                 input=prompt,
                 text=True,
                 capture_output=True,
-                timeout=self.config.codex_timeout_seconds,
+                timeout=timeout,
                 check=False,
             )
         except FileNotFoundError as exc:
             raise AgentError(f"找不到 Codex CLI：{self.config.codex_bin}") from exc
         except subprocess.TimeoutExpired as exc:
-            raise AgentError(f"Codex 超时（{self.config.codex_timeout_seconds}s）") from exc
+            raise AgentError(f"Codex 超时（{timeout}s）") from exc
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout)[-4000:]
             raise AgentError(f"Codex 执行失败（exit={completed.returncode}）：\n{detail}")

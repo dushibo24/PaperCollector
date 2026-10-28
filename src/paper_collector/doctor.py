@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import urllib.error
@@ -60,6 +61,17 @@ def run_checks(config: AppConfig) -> list[Check]:
         ),
         Check(bool(config.interests), "兴趣配置", f"{len(config.interests)} 个方向"),
     ]
+    if config.reading_notes_enabled:
+        checks.extend(
+            [
+                Check(
+                    importlib.util.find_spec("pymupdf") is not None,
+                    "HTML 阅读笔记依赖",
+                    "PyMuPDF；缺失时运行 uv sync --extra notes",
+                ),
+                _network_check("HTML 阅读笔记服务", config.reading_notes_base_url + "/healthz"),
+            ]
+        )
     if config.official_enabled:
         checks.extend(
             [
@@ -68,6 +80,17 @@ def run_checks(config: AppConfig) -> list[Check]:
                     "会议/期刊官网",
                     f"已启用 {len(config.official_sources)} 个适配器："
                     + ", ".join(config.official_sources),
+                ),
+                Check(
+                    True,
+                    "OpenReview 认证",
+                    (
+                        "已配置访问令牌"
+                        if config.openreview_access_token
+                        else "已配置账号密码"
+                        if config.openreview_username and config.openreview_password
+                        else "未配置（匿名请求可能被人机验证拦截）"
+                    ),
                 ),
                 Check(
                     True,

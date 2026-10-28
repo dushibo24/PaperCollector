@@ -10,10 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
+  "openreview-py>=2.6,<3",
   "pypdf>=5.0,<7",
 ]
 
 [project.optional-dependencies]
+notes = [
+  "PyMuPDF>=1.25,<2",
+]
 dev = [
   "pytest>=8.0,<9",
   "ruff>=0.9,<1",

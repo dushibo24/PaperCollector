@@ -14,6 +14,12 @@ per_interest_limit = 20
 # 可选。免费 key: https://www.semanticscholar.org/product/api
 semantic_scholar_api_key = "${SEMANTIC_SCHOLAR_API_KEY}"
 
+# OpenReview 的匿名 API 可能触发人机验证。推荐在 .env 配置账号密码；
+# 访问令牌优先于账号密码，适合启用了 MFA 的非交互定时任务。
+openreview_username = "${OPENREVIEW_USERNAME}"
+openreview_password = "${OPENREVIEW_PASSWORD}"
+openreview_access_token = "${OPENREVIEW_ACCESS_TOKEN}"
+
 # 会议/期刊官网优先发现最新论文；每个官网每次运行只抓一次，再在本地匹配所有兴趣。
 official_enabled = true
 # 抓当前年份及此前年份。2 表示覆盖本年和上一年。
@@ -86,6 +92,17 @@ share_period_days = 365
 # 留空时根据网盘路径生成稳定的四位提取码。
 share_password = ""
 timeout_seconds = 1800
+
+[reading_notes]
+enabled = false
+public_base_url = "${READING_NOTES_BASE_URL}"
+host = "0.0.0.0"
+port = 8765
+timeout_seconds = 1800
+min_chars = 30000
+publish_ssh_host = ""
+publish_ssh_directory = ""
+publish_timeout_seconds = 180
 
 [quality]
 min_recommendation_score = 7.0

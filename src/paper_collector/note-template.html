@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{TITLE}} · 论文阅读笔记</title>
+<style>
+:root{color-scheme:light;--ink:#20302d;--muted:#65756f;--paper:#faf9f5;--line:#dce3dc;--accent:#236e5e}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:30px}body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.85 Georgia,"Noto Serif SC","Songti SC",serif}a{color:var(--accent);overflow-wrap:anywhere}#reading-progress{position:fixed;top:0;left:0;width:100%;height:4px;border:0;z-index:5;accent-color:var(--accent)}.layout{display:grid;grid-template-columns:230px minmax(0,920px);gap:48px;max-width:1260px;padding:60px 28px;margin:auto}aside{align-self:start;position:sticky;top:32px;font:14px/1.8 system-ui,sans-serif}nav a{display:block;padding:9px 0;border-bottom:1px solid var(--line);text-decoration:none}main{min-width:0}header{padding-bottom:32px;border-bottom:2px solid var(--accent)}.eyebrow{font:12px/1.5 system-ui,sans-serif;letter-spacing:.2em;color:var(--accent)}h1{font-size:clamp(28px,4vw,42px);line-height:1.4;margin:18px 0}.subtitle{font-size:21px;color:var(--muted)}.original-title{font:14px/1.7 system-ui,sans-serif;color:var(--muted)}.paper-brief{background:#eaf1eb;padding:20px 26px;border-left:3px solid var(--accent);margin:28px 0}section{margin-top:55px}h2{font-size:27px;border-bottom:1px solid var(--line);padding-bottom:12px}h3{font-size:21px;margin-top:30px}h4{font-size:17px;margin:18px 0 6px}.paragraph p{white-space:pre-line;overflow-wrap:anywhere}.kind{font:11px/1.4 system-ui,sans-serif;display:inline-block;color:var(--accent);border:1px solid var(--line);padding:2px 5px;border-radius:3px;margin-right:5px}.source-ref{font:12px/1.7 system-ui,sans-serif!important;color:var(--muted);margin-top:-8px}.artifact{margin:30px 0;background:white;border:1px solid var(--line);border-radius:8px;padding:22px}.artifact img{display:block;width:100%;height:auto;border:1px solid #eee}.limit{border-left:3px solid #b48143;padding-left:15px}.original-caption{border-top:1px dashed var(--line);margin-top:20px;padding-top:12px;font-size:14px}.original-caption summary{cursor:pointer;color:var(--accent)}pre{overflow:auto;background:#edf0ec;padding:20px;border-radius:6px;font:14px/1.75 ui-monospace,monospace}.table-scroll{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:12px;vertical-align:top;border:1px solid var(--line);min-width:150px}th{background:#eaf1eb}footer{margin-top:60px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:14px}@media(max-width:850px){.layout{display:block;padding:32px 18px}aside{position:static;margin-bottom:30px}nav{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}.artifact{padding:14px}.paper-brief{padding:16px}}@media print{aside,#reading-progress{display:none}.layout{display:block;padding:0}.artifact,pre{break-inside:avoid}body{font-size:12pt;background:white}}
+</style>
+<style>.story-chain{display:flex;flex-wrap:wrap;gap:10px;margin:20px 0}.story-chain span{flex:1 1 145px;background:#edf0ec;padding:12px;font:13px/1.7 system-ui,sans-serif;border-top:2px solid var(--accent)}.tech-step{margin:22px 0;padding-left:16px;border-left:2px solid var(--line)}</style>
+</head>
+<body>
+<progress id="reading-progress" value="0" max="100" aria-label="阅读进度"></progress>
+<div class="layout">
+<aside><p class="eyebrow">PAPER COLLECTOR / READING NOTES</p><nav aria-label="阅读目录">{{NAVIGATION}}</nav></aside>
+<main>
+<header><p class="eyebrow">SOURCE-GROUNDED PAPER NOTES</p><h1>{{TITLE}}</h1><p class="subtitle">{{SUBTITLE}}</p><p class="original-title">{{ORIGINAL_TITLE}}</p></header>
+<div class="paper-brief">{{BRIEF}}</div>
+{{SECTIONS}}
+<footer>{{ORIGINAL_LINK}} · 页码均指物理 PDF 页码。全文与图表内嵌于本页，可保存为 HTML 离线阅读。笔记由 AI 辅助整理，请以原文为准。</footer>
+</main>
+</div>
+<script>{{PROGRESS_SCRIPT}}</script>
+</body>
+</html>

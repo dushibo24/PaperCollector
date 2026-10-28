@@ -95,6 +95,80 @@ def test_openreview_v2_content_values_are_unwrapped(config):
     assert papers[0].pdf_url == "https://openreview.net/pdf?id=note-1"
 
 
+def test_openreview_uses_authenticated_client_when_credentials_are_configured(config):
+    client_kwargs = {}
+    requested_venues = []
+
+    class FakeNote:
+        def to_json(self):
+            return {
+                "id": "note-1",
+                "pdate": 1787529600000,
+                "content": {
+                    "title": {"value": "An Authenticated OpenReview Paper"},
+                    "abstract": {"value": "An agent learning method."},
+                    "authors": {"value": ["Ada"]},
+                    "venue": {"value": "ICLR 2026"},
+                },
+            }
+
+    class FakeClient:
+        def get_all_notes(self, *, content):
+            requested_venues.append(content["venueid"])
+            return [FakeNote()]
+
+    def client_factory(**kwargs):
+        client_kwargs.update(kwargs)
+        return FakeClient()
+
+    authenticated = replace(
+        config,
+        openreview_username="researcher@example.com",
+        openreview_password="test-password",
+    )
+    adapter = OpenReviewAdapter(
+        authenticated,
+        request_json=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("anonymous request should not be used")
+        ),
+        client_factory=client_factory,
+    )
+    adapter.years = [2026]
+
+    papers = adapter.fetch()
+
+    assert client_kwargs == {
+        "baseurl": "https://api2.openreview.net",
+        "username": "researcher@example.com",
+        "password": "test-password",
+    }
+    assert requested_venues == ["ICLR.cc/2026/Conference", "TMLR"]
+    assert papers[0].title == "An Authenticated OpenReview Paper"
+
+
+def test_openreview_access_token_takes_precedence_over_password(config):
+    client_kwargs = {}
+
+    class FakeClient:
+        def get_all_notes(self, *, content):
+            return []
+
+    adapter = OpenReviewAdapter(
+        replace(
+            config,
+            openreview_username="researcher@example.com",
+            openreview_password="test-password",
+            openreview_access_token="test-token",
+        ),
+        client_factory=lambda **kwargs: client_kwargs.update(kwargs) or FakeClient(),
+    )
+    adapter.years = [2026]
+
+    adapter.fetch()
+
+    assert client_kwargs == {"baseurl": "https://api2.openreview.net", "token": "test-token"}
+
+
 def test_pmlr_index_prefilters_then_reads_detail_metadata(config):
     root = """
     <li><a href="v999"><b>Volume 999</b></a> Proceedings of ICML 2026</li>
