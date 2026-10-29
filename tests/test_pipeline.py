@@ -6,6 +6,7 @@ from test_db import make_review
 
 from paper_collector.models import Author, Paper
 from paper_collector.notifiers import NotifyError
+from paper_collector.pdf_tools import PDFError
 from paper_collector.pipeline import Pipeline, brief_for_serverchan, render_brief
 from paper_collector.publishers import ShareLink
 from paper_collector.reading_notes import ReadingNoteError
@@ -14,9 +15,18 @@ from paper_collector.reading_notes import ReadingNoteError
 def test_note_link_is_at_end_of_both_notification_formats():
     from paper_collector.pipeline import brief_for_wecom
 
-    paper = Paper(id="notes", title="Title", abstract="x", authors=[], publication_date="2026-10-26", year=2026)
+    paper = Paper(
+        id="notes",
+        title="Title",
+        abstract="x",
+        authors=[],
+        publication_date="2026-10-26",
+        year=2026,
+    )
     url = "http://198.51.100.25:8765/notes/" + "a" * 32 + ".html"
-    serverchan = brief_for_serverchan(paper, make_review(paper.id), "https://pan.baidu.com/s/test", "1234", url)
+    serverchan = brief_for_serverchan(
+        paper, make_review(paper.id), "https://pan.baidu.com/s/test", "1234", url
+    )
     wecom = brief_for_wecom(paper, make_review(paper.id), url)
     assert serverchan.rstrip().endswith(f"({url})")
     assert wecom.rstrip().endswith(f"({url})")
@@ -26,7 +36,9 @@ def test_note_link_is_at_end_of_both_notification_formats():
 def test_wecom_long_summary_cannot_truncate_the_note_link():
     from paper_collector.pipeline import brief_for_wecom
 
-    paper = Paper(id="long", title="Title", abstract="x", authors=[], publication_date="2026-10-26", year=2026)
+    paper = Paper(
+        id="long", title="Title", abstract="x", authors=[], publication_date="2026-10-26", year=2026
+    )
     review = make_review(paper.id)
     review.summary = "完整研究背景与实验结论。" * 1000
     url = "http://198.51.100.25:8765/notes/" + "d" * 32 + ".html"
@@ -38,7 +50,14 @@ def test_wecom_long_summary_cannot_truncate_the_note_link():
 def test_notes_are_generated_before_delivery_and_included_in_new_zip(config, tmp_path, monkeypatch):
     config.reading_notes_enabled = True
     config.reading_notes_base_url = "http://198.51.100.25:8765"
-    paper = Paper(id="notes", title="Title", abstract="x", authors=[], publication_date="2026-10-26", year=2026)
+    paper = Paper(
+        id="notes",
+        title="Title",
+        abstract="x",
+        authors=[],
+        publication_date="2026-10-26",
+        year=2026,
+    )
     original = tmp_path / "original.pdf"
     original.write_bytes(b"%PDF-test")
     note_path = tmp_path / "reading-note.html"
@@ -76,7 +95,14 @@ def test_missing_note_blocks_notification_before_upload(config, monkeypatch):
     config.reading_notes_enabled = True
     config.notify_channel = "serverchan"
     config.serverchan_sendkey = "test-sendkey"
-    paper = Paper(id="missing", title="Title", abstract="x", authors=[], publication_date="2026-10-26", year=2026)
+    paper = Paper(
+        id="missing",
+        title="Title",
+        abstract="x",
+        authors=[],
+        publication_date="2026-10-26",
+        year=2026,
+    )
 
     def must_not_publish(*_args):
         raise AssertionError("No upload or notification is allowed without a note")
@@ -96,7 +122,14 @@ def test_missing_note_blocks_notification_before_upload(config, monkeypatch):
 
 def test_note_failure_preserves_original_and_does_not_mark_delivered(config, tmp_path, monkeypatch):
     config.reading_notes_enabled = True
-    paper = Paper(id="note-failed", title="Title", abstract="x", authors=[], publication_date="2026-10-26", year=2026)
+    paper = Paper(
+        id="note-failed",
+        title="Title",
+        abstract="x",
+        authors=[],
+        publication_date="2026-10-26",
+        year=2026,
+    )
     original = tmp_path / "original.pdf"
     original.write_bytes(b"%PDF-test")
 
@@ -125,7 +158,14 @@ def test_queued_run_publishes_note_before_notification(config, tmp_path, monkeyp
     config.reading_notes_base_url = "http://198.51.100.25:8765"
     config.notify_channel = "serverchan"
     config.serverchan_sendkey = "test-sendkey"
-    paper = Paper(id="queued-note", title="Queued paper", abstract="x", authors=[], publication_date="2026-10-26", year=2026)
+    paper = Paper(
+        id="queued-note",
+        title="Queued paper",
+        abstract="x",
+        authors=[],
+        publication_date="2026-10-26",
+        year=2026,
+    )
     original = tmp_path / "original.pdf"
     original.write_bytes(b"%PDF-test")
     filename = "c" * 32 + ".html"
@@ -171,6 +211,65 @@ def test_queued_run_publishes_note_before_notification(config, tmp_path, monkeyp
         assert calls == (["note"] if no_notify else ["note", "upload", "notify"])
         assert pipeline.db.work_row(paper.id)["reading_note_url"] == url
         assert bool(pipeline.db.work_row(paper.id)["file_delivered_at"]) is (not no_notify)
+    finally:
+        pipeline.close()
+
+
+def test_failed_pdf_downloads_fall_through_to_ranked_shortlist(config, tmp_path, monkeypatch):
+    config.max_deep_reviews = 1
+    papers = [
+        Paper(
+            id=f"candidate-{rank}",
+            title=f"Paper {rank}",
+            abstract="Public abstract",
+            authors=[],
+            publication_date="2026-10-29",
+            year=2026,
+            pdf_url=f"https://papers.example.test/{rank}.pdf",
+        )
+        for rank in range(1, 6)
+    ]
+    download_attempts = []
+    review_attempts = []
+
+    def download(_url, target):
+        paper_rank = int(target.parent.name.split("-")[-1])
+        download_attempts.append(paper_rank)
+        if paper_rank <= 3:
+            raise PDFError("source returned HTTP 403")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF-stub")
+        return target
+
+    pipeline = Pipeline(config)
+    monkeypatch.setattr(pipeline, "discover", lambda _run_id: [])
+    monkeypatch.setattr(pipeline, "_prepare_candidates", lambda: papers)
+    monkeypatch.setattr(
+        pipeline.agent,
+        "rank",
+        lambda candidates, _run_dir: [
+            {"paper_id": paper.id, "rank": index} for index, paper in enumerate(candidates, start=1)
+        ],
+    )
+    monkeypatch.setattr("paper_collector.pipeline.download_pdf", download)
+    monkeypatch.setattr(
+        "paper_collector.pipeline.extract_text",
+        lambda _path: "Evidence from the complete paper. " * 80,
+    )
+
+    def review(paper, _text, _context, _run_dir):
+        review_attempts.append(paper.id)
+        return make_review(paper.id)
+
+    monkeypatch.setattr(pipeline.agent, "review", review)
+    try:
+        for paper in papers:
+            pipeline.db.upsert_paper(paper)
+        assert pipeline.run(no_notify=True) == "candidate-4"
+        assert download_attempts == [1, 2, 3, 4]
+        assert review_attempts == ["candidate-4"]
+        assert pipeline.db.work_row("candidate-4")["status"] == "translated"
+        assert pipeline.db.work_row("candidate-5")["status"] == "discovered"
     finally:
         pipeline.close()
 
