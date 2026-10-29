@@ -331,7 +331,10 @@ discovered → ranked → reviewed → translated → shared → delivering → 
 - 推荐太泛：缩窄 `description`，加入短语型 `keywords` 和 `negative_keywords`。
 - 小同行论文被 venue 压制：确认使用 `scope = "niche"`，可提高 `weight`。
 - 大同行水文太多：提高 `min_recommendation_score`，完善顶会表，并在描述中明确不可接受的实验缺陷。
-- 每天没有论文：扩大 `recent_days` / `evergreen_years`，增加关键词，或把 `max_deep_reviews` 从 3 调高。
+- PDF 来源临时返回 403/502：流水线会继续尝试精排榜单中的下一篇，直到完成配置数量的全文审读尝试；
+  同一篇无需重新筛选。若整份 `shortlist_size` 中的 PDF 都不可下载，或论文未达到推荐质量阈值，则跳过本次推送，不生成虚假推荐。
+- 每天没有论文：扩大 `recent_days` / `evergreen_years`，增加关键词或扩大 `shortlist_size`；
+  `max_deep_reviews` 限定的是实际全文审读尝试数，不需要用来补偿下载失败。
 - 相邻主题仍太像：提高 `agent.diversity_penalty` 或扩大 `agent.diversity_history_days`；若轮换过强则反向调低。
 - pdf2zh 不稳定：在 `[translation]` 切换你已配置的 service。`google` 不需 key，但网络质量不可控。
 

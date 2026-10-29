@@ -500,7 +500,10 @@ class Pipeline:
                     return selected_id
 
                 by_id = {paper.id: paper for paper in candidates}
-                for rank_context in ranked[: self.config.max_deep_reviews]:
+                deep_review_attempts = 0
+                for rank_context in ranked:
+                    if deep_review_attempts >= self.config.max_deep_reviews:
+                        break
                     paper = by_id[rank_context["paper_id"]]
                     selected_id = paper.id
                     self.db.set_status(paper.id, "ranked")
@@ -513,6 +516,7 @@ class Pipeline:
                         self.db.save_artifacts(paper.id, original_pdf=original)
                         text = extract_text(original)
                         (artifact_dir / "extracted.txt").write_text(text, encoding="utf-8")
+                        deep_review_attempts += 1
                         review = self.agent.review(paper, text, rank_context, run_dir)
                     except (PDFError, AgentError) as exc:
                         self.db.set_status(paper.id, "failed", str(exc))
