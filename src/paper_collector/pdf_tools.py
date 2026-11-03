@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -15,6 +17,9 @@ from paper_collector.config import AppConfig
 
 class PDFError(RuntimeError):
     pass
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def safe_stem(value: str, limit: int = 90) -> str:
@@ -113,19 +118,31 @@ def translate_dual(pdf_path: Path, output_dir: Path, config: AppConfig) -> Path:
         "--output",
         str(output_dir),
     ]
-    try:
-        completed = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=config.translation_timeout_seconds,
-            env=environment,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PDFError(f"pdf2zh 翻译超时（{config.translation_timeout_seconds}s）") from exc
-    if completed.returncode != 0:
+    if config.translation_skip_subset_fonts:
+        command.append("--skip-subset-fonts")
+    started = time.monotonic()
+    while True:
+        remaining = config.translation_timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            raise PDFError(f"pdf2zh 翻译超时（{config.translation_timeout_seconds}s）")
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=remaining,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PDFError(f"pdf2zh 翻译超时（{config.translation_timeout_seconds}s）") from exc
+        if completed.returncode == 0:
+            break
         detail = (completed.stderr or completed.stdout)[-4000:]
+        if "subset_fonts" in detail and "--skip-subset-fonts" not in command:
+            LOGGER.warning("PDF 字体子集化失败，使用现有译文缓存重试兼容模式：%s", pdf_path.name)
+            command.append("--skip-subset-fonts")
+            continue
         raise PDFError(f"pdf2zh 翻译失败（exit={completed.returncode}）：\n{detail}")
     after = set(output_dir.glob("*.pdf"))
     new_files = after - before

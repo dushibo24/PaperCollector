@@ -82,6 +82,7 @@ class AppConfig:
     reading_notes_publish_ssh_directory: str = ""
     reading_notes_publish_ssh_port: int | None = None
     reading_notes_publish_timeout_seconds: int = 180
+    translation_skip_subset_fonts: bool = False
 
     @property
     def reading_notes_dir(self) -> Path:
@@ -339,6 +340,7 @@ def load_config(path: str | Path) -> AppConfig:
         codex_timeout_seconds=int(agent.get("timeout_seconds", 900)),
         pdf2zh_bin=str(translation.get("pdf2zh_bin", "pdf2zh")),
         translation_enabled=bool(translation.get("enabled", True)),
+        translation_skip_subset_fonts=bool(translation.get("skip_subset_fonts", False)),
         translation_service=translation_service,
         translation_openailiked_base_url=openailiked_base_url or None,
         translation_openailiked_api_key=openailiked_api_key or None,

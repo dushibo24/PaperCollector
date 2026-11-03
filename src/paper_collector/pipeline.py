@@ -394,6 +394,7 @@ class Pipeline:
         self.db.save_artifacts(paper.id, brief_path=brief)
         dual = Path(row["dual_pdf"]) if row is not None and row["dual_pdf"] else None
         if not dual or not dual.exists():
+            LOGGER.info("开始准备双语 PDF：%s", paper.title)
             translated = translate_dual(original, artifact_dir / "translated", self.config)
             suffix = "中英双语" if self.config.translation_enabled else "英文原文"
             friendly = artifact_dir / (
@@ -403,6 +404,9 @@ class Pipeline:
                 shutil.copy2(translated, friendly)
             dual = friendly
             self.db.save_artifacts(paper.id, dual_pdf=dual)
+            LOGGER.info("双语 PDF 已就绪：%s", paper.title)
+        if self.config.reading_notes_enabled:
+            LOGGER.info("开始生成、验收并发布完整 HTML 阅读笔记：%s", paper.title)
         reading_note = (
             self._ensure_reading_note(paper, review, original)
             if self.config.reading_notes_enabled else None
@@ -444,6 +448,7 @@ class Pipeline:
                 brief_for_serverchan(paper, review, share_url, share_password or "", note_url),
             )
             self.db.mark_link_delivered(paper.id)
+            LOGGER.info("Server酱已接受论文推送任务：%s", paper.title)
             return
 
         if channel == "wecom":
@@ -479,6 +484,9 @@ class Pipeline:
             try:
                 inflight = self.db.inflight_delivery()
                 if inflight and not dry_run:
+                    selected_id = inflight["id"]
+                    self.db.select_run_paper(run_id, selected_id)
+                    LOGGER.info("恢复上次未完成的论文准备/推送：%s", selected_id)
                     selected_id = self._resume_pending(inflight, no_notify=no_notify)
                     self.db.finish_run(
                         run_id, "prepared" if no_notify else "delivered", selected_id
@@ -552,6 +560,7 @@ class Pipeline:
                 paper = Paper.from_dict(json.loads(queued["paper_json"]))
                 review = Review.from_dict(json.loads(queued["review_json"]))
                 selected_id = paper.id
+                self.db.select_run_paper(run_id, selected_id)
                 _, _, _, package = self._ensure_artifacts(paper, review, row=queued)
                 self.db.event("diversity_selected", run_id, paper.id, ", ".join(review.tags))
                 if no_notify:

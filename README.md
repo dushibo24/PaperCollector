@@ -296,6 +296,9 @@ VPS 模式不需要在 A100-2 上启动 HTTP 服务，也不要在 A100-2 上运
 - 已验收内容按 PDF SHA-256 缓存在知识库中，通知重试、重建丢失的公开 HTML 或修改访问域名
   不会重新调用模型。笔记会增加两阶段模型调用、token 用量和处理时间，必要时追加小型措辞修订调用；
   配置中的 timeout 为每阶段上限。
+- 生成后的完整草稿也会绑定原 PDF 指纹保存。数据记录仅存在单个提前闭合的根括号或 Markdown 围栏时，
+  可不改字段和值地纠正格式；重复键、丢失结构、额外对象或非标准数值仍拒绝发布。
+  正文分析不足时只补充有原文证据的解释段落，不重写现有图表、数据记录和结论，也不靠重复内容凑字数。
 - 私有笔记、裁剪、原始响应和验收缓存位于该论文的知识库目录；SQLite 保存笔记路径和 URL。
   本地索引卡与 JSON 索引位于 `data/public_notes/`，内置 HTTP 服务不提供索引浏览或目录列表。
 - HTTP 仅提供 `/healthz` 与严格匹配的 `/notes/随机文件名.html`，禁止任意路径、符号链接、
@@ -337,6 +340,10 @@ discovered → ranked → reviewed → translated → shared → delivering → 
   `max_deep_reviews` 限定的是实际全文审读尝试数，不需要用来补偿下载失败。
 - 相邻主题仍太像：提高 `agent.diversity_penalty` 或扩大 `agent.diversity_history_days`；若轮换过强则反向调低。
 - pdf2zh 不稳定：在 `[translation]` 切换你已配置的 service。`google` 不需 key，但网络质量不可控。
+- `pdf2zh` 在 `subset_fonts` 阶段失败：自动使用已有译文缓存，以 `--skip-subset-fonts` 重试。
+  也可设置 `[translation].skip_subset_fonts = true`，直接采用兼容模式；PDF 文件可能更大。
+- 双语 PDF 已完成、笔记或发送失败：下次先恢复这篇未完成的投递，不重复抓取和精排。
+  09:00 是任务启动时间，翻译和完整笔记完成后才发送；`data/logs/cron-YYYY-MM-DD.log` 会记录阶段进度。
 
 ## 开发
 

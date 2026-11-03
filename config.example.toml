@@ -70,6 +70,7 @@ OPENAILIKED_BASE_URL = "${OPENAILIKED_BASE_URL}"
 OPENAILIKED_API_KEY = "${OPENAILIKED_API_KEY}"
 OPENAILIKED_MODEL = "${OPENAILIKED_MODEL}"
 threads = 4
+skip_subset_fonts = false
 timeout_seconds = 3600
 
 [notify]

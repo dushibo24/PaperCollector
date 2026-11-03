@@ -21,7 +21,16 @@ def test_load_config_resolves_data_dir(config_file: Path):
     assert config.diversity_penalty == 1.5
     assert config.reading_notes_enabled is False
     assert config.reading_notes_min_chars == 30000
+    assert config.translation_skip_subset_fonts is False
     assert config.reading_notes_dir == config.data_dir / "public_notes"
+
+
+def test_translation_font_compatibility_setting_is_loaded(config_file):
+    text = config_file.read_text().replace(
+        "[translation]\nenabled = false", "[translation]\nenabled = false\nskip_subset_fonts = true"
+    )
+    config_file.write_text(text)
+    assert load_config(config_file).translation_skip_subset_fonts is True
 
 
 def test_reading_note_settings_and_public_url_environment(config_file: Path, monkeypatch):
@@ -37,7 +46,7 @@ def test_reading_note_settings_and_public_url_environment(config_file: Path, mon
 def test_enabled_reading_notes_require_a_public_url(config_file: Path, monkeypatch):
     monkeypatch.delenv("READING_NOTES_BASE_URL", raising=False)
     with config_file.open("a") as handle:
-        handle.write('\n[reading_notes]\nenabled=true\n')
+        handle.write("\n[reading_notes]\nenabled=true\n")
     with pytest.raises(ConfigError, match="public_base_url"):
         load_config(config_file)
 
@@ -55,29 +64,41 @@ def test_vps_publication_is_configured_on_a100_without_changing_local_paths(conf
     assert config.reading_notes_host == "127.0.0.1"
 
 
-@pytest.mark.parametrize("settings", [
-    'publish_ssh_host="root@82.156.88.52"',
-    'publish_ssh_directory="/root/public"',
-    'publish_ssh_host="-oProxyCommand=bad"\npublish_ssh_directory="/root/public"',
-    'publish_ssh_host="root@host;whoami"\npublish_ssh_directory="/root/public"',
-    'publish_ssh_host="root@host"\npublish_ssh_directory="relative"',
-    'publish_ssh_host="root@host"\npublish_ssh_directory="/root/../etc"',
-    'publish_ssh_host="root@host"\npublish_ssh_directory="///"',
-    'publish_ssh_port=65536',
-    'publish_timeout_seconds=0',
-])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        'publish_ssh_host="root@82.156.88.52"',
+        'publish_ssh_directory="/root/public"',
+        'publish_ssh_host="-oProxyCommand=bad"\npublish_ssh_directory="/root/public"',
+        'publish_ssh_host="root@host;whoami"\npublish_ssh_directory="/root/public"',
+        'publish_ssh_host="root@host"\npublish_ssh_directory="relative"',
+        'publish_ssh_host="root@host"\npublish_ssh_directory="/root/../etc"',
+        'publish_ssh_host="root@host"\npublish_ssh_directory="///"',
+        "publish_ssh_port=65536",
+        "publish_timeout_seconds=0",
+    ],
+)
 def test_invalid_vps_publication_settings_are_rejected(config_file, settings):
     with config_file.open("a") as handle:
-        handle.write('\n[reading_notes]\n' + settings + '\n')
+        handle.write("\n[reading_notes]\n" + settings + "\n")
     with pytest.raises(ConfigError, match="publish_"):
         load_config(config_file)
 
 
-@pytest.mark.parametrize("url", [
-    "file:///etc/passwd", "javascript:alert(1)", "http://user:secret@example.test",
-    "http://example.test/?secret=x", "http://example.test/#fragment", "http://example.test/../private",
-    "http://example.test/%2e%2e/private", "http://example.test:99999", "http://example.test/bad path",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "http://user:secret@example.test",
+        "http://example.test/?secret=x",
+        "http://example.test/#fragment",
+        "http://example.test/../private",
+        "http://example.test/%2e%2e/private",
+        "http://example.test:99999",
+        "http://example.test/bad path",
+    ],
+)
 def test_invalid_reading_note_base_urls_are_rejected(config_file: Path, url):
     with config_file.open("a") as handle:
         handle.write(f'\n[reading_notes]\nenabled=true\npublic_base_url="{url}"\n')

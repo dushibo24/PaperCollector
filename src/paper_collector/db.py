@@ -145,6 +145,12 @@ class StateDB:
         )
         self.connection.commit()
 
+    def select_run_paper(self, run_id: int, paper_id: str) -> None:
+        self.connection.execute(
+            "UPDATE runs SET selected_work_id=? WHERE id=? AND status='running'", (paper_id, run_id)
+        )
+        self.connection.commit()
+
     def event(
         self, event: str, run_id: int | None = None, work_id: str | None = None, detail: str = ""
     ) -> None:
@@ -247,6 +253,7 @@ class StateDB:
                  AND file_delivered_at IS NULL
                  AND (
                      status IN ('translated', 'shared', 'delivering')
+                     OR dual_pdf IS NOT NULL
                      OR package_path IS NOT NULL
                      OR share_url IS NOT NULL
                  )
