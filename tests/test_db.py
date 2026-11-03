@@ -77,6 +77,36 @@ def test_reading_note_fields_survive_reopening_database_without_changing_deliver
         db.close()
 
 
+def test_completed_translation_is_resumed_after_note_generation_failure(tmp_path):
+    db = StateDB(tmp_path / "state.sqlite3")
+    paper = make_paper()
+    try:
+        db.upsert_paper(paper)
+        db.save_review(paper.id, make_review(paper.id))
+        db.save_artifacts(paper.id, dual_pdf=tmp_path / "dual.pdf")
+        db.set_status(paper.id, "failed", "note JSON invalid")
+        assert db.inflight_delivery()["id"] == paper.id
+        db.mark_link_delivered(paper.id)
+        assert db.inflight_delivery() is None
+    finally:
+        db.close()
+
+
+def test_active_run_records_selected_paper_before_delivery_finishes(tmp_path):
+    db = StateDB(tmp_path / "state.sqlite3")
+    paper = make_paper()
+    try:
+        db.upsert_paper(paper)
+        run_id = db.start_run()
+        db.select_run_paper(run_id, paper.id)
+        row = db.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        assert row["selected_work_id"] == paper.id
+        assert row["status"] == "running"
+        assert row["finished_at"] is None
+    finally:
+        db.close()
+
+
 def test_same_title_is_deduplicated_across_sources(tmp_path):
     db = StateDB(tmp_path / "state.sqlite3")
     try:

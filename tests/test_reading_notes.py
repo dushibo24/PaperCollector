@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from dataclasses import fields
 from pathlib import Path
@@ -10,10 +11,14 @@ from paper_collector.reading_note_schema import SECTION_IDS
 from paper_collector.reading_notes import (
     ReadingNoteError,
     ReadingNotes,
+    append_note_paragraphs,
     apply_text_repairs,
     banned_passages,
+    body_character_count,
     contact_sheets,
     crop_artifacts,
+    normalize_data_record,
+    parse_record_json,
     pdf_inventory,
     render_note,
     validate_note,
@@ -21,6 +26,135 @@ from paper_collector.reading_notes import (
 )
 
 pymupdf = pytest.importorskip("pymupdf")
+
+
+def test_premature_record_close_is_repaired_without_changing_fields_or_values():
+    raw = '{"input":{"instruction":"autumn"},"processing":{"metrics":[{"weight":"25%"}]}} ,"output":{"strong":8.2,"weak":5.4},"unreported":["seed"]}'
+    assert parse_record_json(raw) == {
+        "input": {"instruction": "autumn"},
+        "processing": {"metrics": [{"weight": "25%"}]},
+        "output": {"strong": 8.2, "weak": 5.4},
+        "unreported": ["seed"],
+    }
+
+
+def test_record_markdown_wrapper_is_removed_without_altering_string_values():
+    assert parse_record_json('```json\n{"input":"100% unchanged"}\n```') == {
+        "input": "100% unchanged"
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"input":1} {"output":2}',
+        '{"input":1} explanatory prose',
+        '{"input":1,"input":2}',
+        '{"input":NaN}',
+        '{"input":Infinity}',
+        '{"input":',
+        '[{"input":1}]',
+        "{}",
+        '{"input":1},"input":2}',
+    ],
+)
+def test_record_repair_never_discards_extra_values_or_invents_missing_structure(raw):
+    with pytest.raises(ReadingNoteError):
+        parse_record_json(raw)
+
+
+def test_source_bound_draft_is_recovered_without_regenerating_full_note(notes_inputs):
+    config, paper, review, pdf, _, _, plan, note = notes_inputs
+    note["data_record"]["json"] = '{"input":{"value":"source example"}},"output":8.2}'
+    note["data_record"]["fields"].append(
+        {"name": "output", "description": copy.deepcopy(note["brief"])}
+    )
+    directory = config.knowledge_base_dir / "papers" / "test"
+    draft = directory / "reading-note" / "attempt-1" / "draft.json"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+                "plan": plan,
+                "note": note,
+            }
+        )
+    )
+
+    class MustNotRegenerate:
+        def _run(self, *_args, **_kwargs):
+            raise AssertionError("Draft recovery must not rerun the model")
+
+    path, _ = ReadingNotes(config, MustNotRegenerate()).ensure(paper, review, pdf, directory)
+    cache = json.loads((draft.parent.parent / "validated.json").read_text())
+    assert json.loads(cache["note"]["data_record"]["json"]) == {
+        "input": {"value": "source example"},
+        "output": 8.2,
+    }
+    assert path.is_file()
+
+
+def test_record_normalization_does_not_mutate_the_model_response(notes_inputs):
+    *_, note = notes_inputs
+    original = copy.deepcopy(note)
+    normalized = normalize_data_record(note)
+    assert note == original
+    assert json.loads(normalized["data_record"]["json"]) == {"input": "demonstration only"}
+
+
+def test_short_note_is_completed_by_adding_source_cited_paragraphs_only(notes_inputs):
+    config, paper, _, _, workspace, inventory, plan, note = notes_inputs
+    original = copy.deepcopy(note)
+    config.reading_notes_min_chars = body_character_count(note) + 1000
+    new_paragraph = {
+        "text": "补充分析，逐步解释方法假设与评价边界。" * 100,
+        "pages": [1],
+        "kind": "analysis",
+    }
+
+    class ExpansionAgent:
+        def _run(self, _prompt, schema, _output, **_kwargs):
+            assert schema.name == "reading-note-expand.schema.json"
+            return {"sections": [{"id": "technical", "paragraphs": [new_paragraph]}]}
+
+    result = ReadingNotes(config, ExpansionAgent()).complete_note(
+        note, plan, inventory, paper.id, workspace, "source-hash", []
+    )
+    assert body_character_count(result) >= config.reading_notes_min_chars
+    assert result["artifacts"] == original["artifacts"]
+    assert result["data_record"] == original["data_record"]
+    assert result["sections"][4]["paragraphs"][:-1] == original["sections"][4]["paragraphs"]
+    assert note == original
+
+
+def test_note_expansion_cannot_repeat_existing_paragraphs_to_pad_length(notes_inputs):
+    *_, note = notes_inputs
+    duplicate = copy.deepcopy(note["brief"])
+    with pytest.raises(ReadingNoteError, match="重复"):
+        append_note_paragraphs(note, [{"id": "technical", "paragraphs": [duplicate]}])
+
+
+def test_draft_for_another_pdf_is_never_reused(notes_inputs):
+    config, paper, review, pdf, _, _, plan, note = notes_inputs
+    stale = copy.deepcopy(note)
+    stale["brief"]["text"] = "旧版本并非当前论文。"
+    directory = config.knowledge_base_dir / "papers" / "test"
+    draft = directory / "reading-note" / "attempt-1" / "draft.json"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(
+        json.dumps({"version": 1, "pdf_sha256": "wrong-version", "plan": plan, "note": stale})
+    )
+    calls = []
+
+    class FreshAgent:
+        def _run(self, _prompt, schema, _output, **_kwargs):
+            calls.append(schema.name)
+            return copy.deepcopy(plan if "plan" in schema.name else note)
+
+    ReadingNotes(config, FreshAgent()).ensure(paper, review, pdf, directory)
+    assert calls == ["reading-note-plan.schema.json", "reading-note.schema.json"]
 
 
 def test_targeted_repair_keeps_original_note_numbers_and_citations():

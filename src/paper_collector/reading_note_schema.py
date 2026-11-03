@@ -107,3 +107,16 @@ NOTE_SCHEMA = object_schema(
 TEXT_REPAIR_SCHEMA = object_schema(
     {"edits": array_schema(object_schema({"path": TEXT, "original": TEXT, "replacement": TEXT}))}
 )
+
+NOTE_EXPANSION_SCHEMA = object_schema(
+    {
+        "sections": array_schema(
+            object_schema(
+                {
+                    "id": {"type": "string", "enum": list(SECTION_IDS)},
+                    "paragraphs": array_schema(PARAGRAPH),
+                }
+            )
+        )
+    }
+)

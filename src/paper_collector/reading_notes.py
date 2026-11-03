@@ -5,6 +5,7 @@ import copy
 import hashlib
 import html
 import json
+import logging
 import math
 import re
 import secrets
@@ -19,6 +20,7 @@ from paper_collector.models import Paper, Review
 from paper_collector.note_publishing import publish_remote_note
 from paper_collector.notes_http import MAX_NOTE_BYTES, PROGRESS_SCRIPT, PUBLIC_FILENAME
 from paper_collector.reading_note_schema import (
+    NOTE_EXPANSION_SCHEMA,
     NOTE_SCHEMA,
     PLAN_SCHEMA,
     SECTION_IDS,
@@ -27,10 +29,107 @@ from paper_collector.reading_note_schema import (
 
 CAPTION = re.compile(r"^\s*(Figure|Fig\.?|Table)\s*([0-9]+[A-Za-z]?|[IVXLC]+)\b", re.IGNORECASE)
 BANNED = ("而是", "而非", "而不是", "并非")
+LOGGER = logging.getLogger(__name__)
 
 
 class ReadingNoteError(RuntimeError):
     pass
+
+
+def parse_record_json(value: str) -> dict[str, Any]:
+    def unique_object(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ReadingNoteError(f"数据记录包含重复字段：{key}")
+            result[key] = item
+        return result
+
+    def reject_constant(constant):
+        raise ReadingNoteError(f"数据记录包含非标准 JSON 数值：{constant}")
+
+    if not isinstance(value, str):
+        raise ReadingNoteError("数据记录必须是 JSON 字符串")
+    text = value.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    decoder = json.JSONDecoder(object_pairs_hook=unique_object, parse_constant=reject_constant)
+    try:
+        parsed = decoder.decode(text)
+    except json.JSONDecodeError as exc:
+        if exc.msg != "Extra data":
+            raise ReadingNoteError(f"数据记录 JSON 无效：{exc}") from exc
+        prefix, end = decoder.raw_decode(text)
+        if (
+            not isinstance(prefix, dict)
+            or text[end - 1] != "}"
+            or not text[end:].lstrip().startswith(",")
+        ):
+            raise ReadingNoteError(f"数据记录包含额外内容，拒绝丢弃数据：{exc}") from exc
+        try:
+            parsed = decoder.decode(text[: end - 1] + text[end:])
+        except json.JSONDecodeError as repair_error:
+            raise ReadingNoteError(f"数据记录无法通过单括号纠正：{repair_error}") from repair_error
+    if not isinstance(parsed, dict) or not parsed:
+        raise ReadingNoteError("data-record 必须是非空 JSON 对象")
+    return parsed
+
+
+def normalize_data_record(note: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(note)
+    try:
+        record = result["data_record"]
+        record["json"] = json.dumps(parse_record_json(record["json"]), ensure_ascii=False)
+    except (KeyError, TypeError) as exc:
+        raise ReadingNoteError(f"数据记录结构错误：{exc}") from exc
+    return result
+
+
+def body_character_count(value: Any) -> int:
+    if isinstance(value, dict):
+        if {"text", "pages", "kind"} <= value.keys():
+            return len(value["text"])
+        return sum(body_character_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(body_character_count(item) for item in value)
+    return 0
+
+
+def append_note_paragraphs(note: dict[str, Any], additions: list[dict[str, Any]]) -> dict[str, Any]:
+    result = copy.deepcopy(note)
+    sections = {section["id"]: section for section in result["sections"]}
+    existing = set()
+
+    def collect(value):
+        if isinstance(value, dict):
+            if {"text", "pages", "kind"} <= value.keys():
+                existing.add(value["text"])
+            else:
+                for item in value.values():
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(note)
+    seen_sections = set()
+    added = 0
+    for section in additions:
+        identity = section.get("id")
+        if identity not in sections or identity in seen_sections:
+            raise ReadingNoteError("补充段落必须归属原有章节，不能重复章节或重写其它字段")
+        seen_sections.add(identity)
+        for paragraph in section.get("paragraphs", []):
+            text = paragraph.get("text", "")
+            if not isinstance(text, str) or not text.strip() or text in existing:
+                raise ReadingNoteError("补充分析为空或重复了原文，拒绝凑字数")
+            existing.add(text)
+            sections[identity]["paragraphs"].append(copy.deepcopy(paragraph))
+            added += len(text)
+    if not added:
+        raise ReadingNoteError("没有补充有效的技术分析")
+    return result
 
 
 def banned_passages(value: Any, path: str = "") -> list[dict[str, str]]:
@@ -305,7 +404,7 @@ def validate_note(
         if set(identities) != expected or len(identities) != len(expected):
             raise ReadingNoteError("图表解读必须逐一覆盖全部裁剪，不能重复或遗漏")
         record = note["data_record"]
-        record_value = json.loads(record["json"])
+        record_value = parse_record_json(record["json"])
         if not isinstance(record_value, dict) or not record_value:
             raise ReadingNoteError("data-record 必须是非空 JSON 对象")
         if type(record["reconstructed"]) is not bool:
@@ -393,7 +492,7 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
     )
     record_html = (
         '<h3>可重建的数据记录 / 输入输出实例</h3><pre class="data-record">'
-        + html.escape(json.dumps(json.loads(record["json"]), ensure_ascii=False, indent=2))
+        + html.escape(json.dumps(parse_record_json(record["json"]), ensure_ascii=False, indent=2))
         + "</pre>"
         + source_ref(record["pages"], reconstructed)
     )
@@ -498,6 +597,93 @@ class ReadingNotes:
         )
         return apply_text_repairs(note, result.get("edits", []))
 
+    def complete_note(self, note, plan, inventory, paper_id, workspace, fingerprint, images):
+        note = self.repair_connectives(normalize_data_record(note), workspace)
+        validate_note(note, plan, paper_id, inventory["page_count"], 1)
+        for attempt in range(1, 3):
+            current = body_character_count(note)
+            if current >= self.config.reading_notes_min_chars:
+                break
+            target = int((self.config.reading_notes_min_chars - current) * 1.5) + 1000
+            LOGGER.info(
+                "补充笔记中的实质技术分析：已有 %s 字符，要求 %s",
+                current,
+                self.config.reading_notes_min_chars,
+            )
+            completion = workspace / f"completion-{attempt}"
+            additions = self._ask(
+                "reading-note-expand.md",
+                NOTE_EXPANSION_SCHEMA,
+                completion,
+                images,
+                current_chars=current,
+                min_chars=self.config.reading_notes_min_chars,
+                min_extra_chars=target,
+                inventory_json=json.dumps(inventory, ensure_ascii=False),
+                plan_json=json.dumps(plan, ensure_ascii=False),
+                note_json=json.dumps(note, ensure_ascii=False),
+            )
+            note = append_note_paragraphs(note, additions.get("sections", []))
+            note = self.repair_connectives(note, completion)
+            validate_note(note, plan, paper_id, inventory["page_count"], 1)
+            atomic_write(
+                workspace / "draft.json",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "pdf_sha256": fingerprint,
+                        "plan": plan,
+                        "note": note,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        validate_note(
+            note, plan, paper_id, inventory["page_count"], self.config.reading_notes_min_chars
+        )
+        return note
+
+    def _recover_draft(self, workspace, fingerprint, inventory, paper_id, pdf):
+        drafts = sorted(
+            workspace.glob("attempt-*/draft.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in drafts:
+            try:
+                draft = json.loads(path.read_text(encoding="utf-8"))
+                if draft.get("version") != 1 or draft.get("pdf_sha256") != fingerprint:
+                    continue
+                validate_plan(draft["plan"], inventory)
+                crops = crop_artifacts(pdf, draft["plan"], workspace)
+                note = self.complete_note(
+                    draft["note"],
+                    draft["plan"],
+                    inventory,
+                    paper_id,
+                    path.parent,
+                    fingerprint,
+                    crops,
+                )
+                validate_note(
+                    note,
+                    draft["plan"],
+                    paper_id,
+                    inventory["page_count"],
+                    self.config.reading_notes_min_chars,
+                )
+                LOGGER.info("复用已生成并重新验收的阅读笔记草稿：%s", path.parent.name)
+                return {
+                    "version": 1,
+                    "pdf_sha256": fingerprint,
+                    "public_filename": secrets.token_hex(16) + ".html",
+                    "plan": draft["plan"],
+                    "note": note,
+                }
+            except (OSError, ValueError, TypeError, KeyError, ReadingNoteError, AgentError):
+                continue
+        return None
+
     def ensure(
         self, paper: Paper, review: Review, pdf: Path, artifact_dir: Path
     ) -> tuple[Path, str]:
@@ -513,6 +699,7 @@ class ReadingNotes:
                 candidate = json.loads(cache_path.read_text(encoding="utf-8"))
                 if candidate.get("pdf_sha256") == fingerprint and candidate.get("version") == 1:
                     validate_plan(candidate["plan"], inventory)
+                    candidate["note"] = normalize_data_record(candidate["note"])
                     validate_note(
                         candidate["note"],
                         candidate["plan"],
@@ -524,6 +711,8 @@ class ReadingNotes:
                         cache = candidate
             except (ValueError, TypeError, KeyError, ReadingNoteError):
                 cache = None
+        if cache is None:
+            cache = self._recover_draft(workspace, fingerprint, inventory, paper.id, pdf)
         if cache is None:
             feedback = ""
             for attempt in range(1, 3):
@@ -553,7 +742,22 @@ class ReadingNotes:
                         plan_json=json.dumps(plan, ensure_ascii=False),
                         min_chars=self.config.reading_notes_min_chars,
                     )
-                    note = self.repair_connectives(note, attempt_dir)
+                    atomic_write(
+                        attempt_dir / "draft.json",
+                        json.dumps(
+                            {"version": 1, "pdf_sha256": fingerprint, "plan": plan, "note": note},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    note = self.complete_note(
+                        note,
+                        plan,
+                        inventory,
+                        paper.id,
+                        attempt_dir,
+                        fingerprint,
+                        crops,
+                    )
                     validate_note(
                         note,
                         plan,
