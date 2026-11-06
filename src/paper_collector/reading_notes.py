@@ -20,9 +20,9 @@ from paper_collector.models import Paper, Review
 from paper_collector.note_publishing import publish_remote_note
 from paper_collector.notes_http import MAX_NOTE_BYTES, PROGRESS_SCRIPT, PUBLIC_FILENAME
 from paper_collector.reading_note_schema import (
-    NOTE_EXPANSION_SCHEMA,
     NOTE_SCHEMA,
     PLAN_SCHEMA,
+    READING_GUIDE_SCHEMA,
     SECTION_IDS,
     TEXT_REPAIR_SCHEMA,
 )
@@ -382,6 +382,26 @@ def validate_note(
                 raise ReadingNoteError("阅读笔记章节内容为空")
             for paragraph in section["paragraphs"]:
                 check_paragraph(paragraph)
+        guide = note.get("reading_guide")
+        if guide is not None:
+            for field in ("problem", "insight", "takeaway"):
+                check_paragraph(guide[field])
+            for field, minimum, maximum in (("mechanism", 2, 5), ("findings", 2, 4)):
+                if not minimum <= len(guide[field]) <= maximum:
+                    raise ReadingNoteError("阅读主线需要 2–5 个机制步骤和 2–4 条核心证据")
+                for item in guide[field]:
+                    if not item["title"].strip() or len(item["title"]) > 60:
+                        raise ReadingNoteError("阅读主线的小标题必须简明且表达结论")
+                    for key in ("explanation",) if field == "mechanism" else ("result", "boundary"):
+                        check_paragraph(item[key])
+        for section in note["sections"]:
+            for paragraph in section.get("supporting_paragraphs", []):
+                check_paragraph(paragraph)
+            for paragraph in section["paragraphs"]:
+                if "heading" in paragraph and (
+                    not paragraph["heading"].strip() or len(paragraph["heading"]) > 60
+                ):
+                    raise ReadingNoteError("正文小标题必须简明且表达结论")
         identities = []
         for artifact in note["artifacts"]:
             if type(artifact["page"]) is not int:
@@ -393,6 +413,12 @@ def validate_note(
                 )
             if artifact["section"] not in {"technical", "evaluation-protocol", "experiments"}:
                 raise ReadingNoteError("图表归属章节无效")
+            if "importance" in artifact and artifact["importance"] not in {"core", "supporting"}:
+                raise ReadingNoteError("图表阅读层级无效")
+            if "headline" in artifact and (
+                not artifact["headline"].strip() or len(artifact["headline"]) > 60
+            ):
+                raise ReadingNoteError("图表结论标题必须简明")
             for field in ("paper_claim", "analysis", "axes", "interpretation", "limit"):
                 check_paragraph(artifact[field])
             if (
@@ -444,8 +470,14 @@ def source_ref(pages: list[int], extra: str = "") -> str:
 
 def paragraph_html(paragraph: dict[str, Any]) -> str:
     label = "论文主张" if paragraph["kind"] == "claim" else "笔记分析"
+    heading = (
+        f'<h3 class="paragraph-heading">{html.escape(paragraph["heading"])}</h3>'
+        if paragraph.get("heading")
+        else ""
+    )
     return (
-        f'<div class="paragraph {paragraph["kind"]}"><p><span class="kind">{label}</span> '
+        f'<div class="paragraph {paragraph["kind"]}">{heading}'
+        f'<p><span class="kind">{label}</span> '
         f"{html.escape(paragraph['text'])}</p>{source_ref(paragraph['pages'])}</div>"
     )
 
@@ -457,6 +489,30 @@ def safe_paper_url(paper: Paper) -> str:
     return ""
 
 
+def reading_guide_html(guide: dict[str, Any]) -> str:
+    body = '<section id="reading-guide" class="reading-guide"><h2>先抓住这条主线</h2>'
+    for key, title in (("problem", "要解决什么"), ("insight", "关键想法")):
+        body += f'<div class="guide-{key}"><h3>{title}</h3>{paragraph_html(guide[key])}</div>'
+    body += '<h3>方法如何走通</h3><ol class="mechanism-chain">'
+    for step in guide["mechanism"]:
+        body += (
+            f"<li><h4>{html.escape(step['title'])}</h4>{paragraph_html(step['explanation'])}</li>"
+        )
+    body += '</ol><p class="read-deeper"><a href="#technical">沿着机制继续读 ↓</a></p>'
+    body += '<h3>最值得记住的证据</h3><div class="key-findings">'
+    for finding in guide["findings"]:
+        body += (
+            f'<article class="key-finding"><h4>{html.escape(finding["title"])}</h4>'
+            + paragraph_html(finding["result"])
+            + '<div class="finding-boundary"><strong>这条证据的边界</strong>'
+            + paragraph_html(finding["boundary"])
+            + "</div></article>"
+        )
+    body += '</div><p class="read-deeper"><a href="#experiments">核对实验与原图 ↓</a></p>'
+    body += '<div class="takeaway"><h3>读完应带走什么</h3>'
+    return body + paragraph_html(guide["takeaway"]) + "</div></section>"
+
+
 def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], paper: Paper) -> str:
     figures = {}
     artifact_lookup = {
@@ -466,15 +522,15 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
         label = normalized_label(artifact["label"])
         explanation = artifact_lookup[(label, artifact["page"])]
         image = base64.b64encode(crop.read_bytes()).decode("ascii")
+        headline = html.escape(explanation.get("headline", ""))
         body = (
             f'<figure class="artifact evidence-figure" data-label="{html.escape(label)}" '
-            f'data-role="{artifact["role"]}"><h3>{html.escape(label)} · PDF p.{artifact["page"]}</h3>'
+            f'data-role="{artifact["role"]}"><h3>{html.escape(label)} · {headline or "原图与解释"}'
+            f" <small>PDF p.{artifact['page']}</small></h3>"
             f'<img loading="lazy" src="data:image/png;base64,{image}" alt="{html.escape(label)}">'
         )
         for field, title in (
             ("paper_claim", "论文主张"),
-            ("analysis", "笔记分析"),
-            ("axes", "设置、变量与坐标/行列"),
             ("interpretation", "结果与解释"),
             ("limit", "边界与反例"),
         ):
@@ -482,9 +538,17 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
                 f'<div class="{field}"><h4>{title}</h4>{paragraph_html(explanation[field])}</div>'
             )
         body += (
-            '<details class="original-caption"><summary>原始图注 / 表题</summary>'
-            f"<p>{html.escape(artifact['caption'])}</p>{source_ref([artifact['page']])}</details></figure>"
+            '<details class="figure-details"><summary>展开推理、实验设置与原始图注</summary>'
+            f"<h4>笔记分析</h4>{paragraph_html(explanation['analysis'])}"
+            f"<h4>设置、变量与坐标/行列</h4>{paragraph_html(explanation['axes'])}"
+            '<div class="original-caption"><h4>原始图注 / 表题</h4>'
+            f"<p>{html.escape(artifact['caption'])}</p>{source_ref([artifact['page']])}</div></details></figure>"
         )
+        if explanation.get("importance") == "supporting":
+            body = (
+                f'<details class="supporting-figure"><summary>{html.escape(label)} · '
+                f"{headline or '补充图表与完整解读'}</summary>{body}</details>"
+            )
         figures.setdefault(explanation["section"], []).append(body)
     record = note["data_record"]
     reconstructed = (
@@ -500,27 +564,39 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
         record_html += (
             f"<h4>{html.escape(field['name'])}</h4>{paragraph_html(field['description'])}"
         )
+    guide = note.get("reading_guide")
     sections = []
-    navigation = []
-    for section in note["sections"]:
+    navigation = ['<a href="#reading-guide">先抓主线</a>'] if guide else []
+    by_id = {section["id"]: section for section in note["sections"]}
+    main_sections = ("story", "technical", "experiments")
+    order = main_sections + (
+        "evaluation-protocol",
+        "overview",
+        "writing",
+        "metadata",
+        "source-discrepancies",
+    )
+    for identity in order:
+        section = by_id[identity]
         identity = section["id"]
         title = html.escape(section["title"])
         navigation.append(f'<a href="#{identity}">{title}</a>')
         body = "".join(paragraph_html(paragraph) for paragraph in section["paragraphs"])
-        if identity == "story":
-            steps = "".join(
-                f"<span>{html.escape(paragraph['text'].split('。')[0][:100])}</span>"
-                for paragraph in section["paragraphs"][:5]
-            )
-            body = f'<div class="story-chain">{steps}</div>' + body
         if identity == "technical":
             body = "".join(
                 f'<div class="tech-step">{paragraph_html(paragraph)}</div>'
                 for paragraph in section["paragraphs"]
             )
-            body += record_html
+            body += (
+                '<details class="supporting-detail"><summary>输入输出实例与逐字段解释</summary>'
+                + record_html
+                + "</details>"
+            )
         body += "".join(figures.get(identity, []))
         if identity == "experiments":
+            body += (
+                '<details class="supporting-detail"><summary>完整证据综合表（逐项核对）</summary>'
+            )
             body += '<div class="table-scroll"><table class="evidence-synthesis"><thead><tr>'
             body += "<th>主张</th><th>证据</th><th>关键数值</th><th>边界</th></tr></thead><tbody>"
             for row in note["evidence_synthesis"]:
@@ -532,7 +608,7 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
                     )
                     + "</tr>"
                 )
-            body += "</tbody></table></div>"
+            body += "</tbody></table></div></details>"
         if identity == "source-discrepancies":
             body += '<div class="table-scroll"><table class="source-discrepancies"><thead><tr>'
             body += "<th>项目</th><th>论文表述</th><th>核对结果与边界</th></tr></thead><tbody>"
@@ -543,7 +619,21 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
                     f"<td>{paragraph_html(row['verification'])}</td></tr>"
                 )
             body += "</tbody></table></div>"
-        sections.append(f'<section id="{identity}"><h2>{title}</h2>{body}</section>')
+        supporting = section.get("supporting_paragraphs", [])
+        if supporting:
+            body += (
+                '<details class="supporting-detail"><summary>展开补充推导与完整核查记录</summary>'
+                + "".join(paragraph_html(paragraph) for paragraph in supporting)
+                + "</details>"
+            )
+        if identity in main_sections:
+            number = main_sections.index(identity) + 1
+            sections.append(f'<section id="{identity}"><h2>{number}. {title}</h2>{body}</section>')
+        else:
+            sections.append(
+                f'<details id="{identity}" class="appendix"><summary>{title}</summary>'
+                f'<div class="appendix-body">{body}</div></details>'
+            )
     template = (Path(__file__).with_name("note-template.html")).read_text(encoding="utf-8")
     original = safe_paper_url(paper)
     original_link = (
@@ -555,7 +645,14 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
         "TITLE": html.escape(note["title_zh"]),
         "SUBTITLE": html.escape(note["subtitle"]),
         "ORIGINAL_TITLE": html.escape(paper.title),
-        "BRIEF": paragraph_html(note["brief"]),
+        "BRIEF": (
+            reading_guide_html(guide)
+            + '<details class="supporting-detail legacy-brief"><summary>论文全貌（含配置与数字）</summary>'
+            + paragraph_html(note["brief"])
+            + "</details>"
+            if guide
+            else '<div class="paper-brief">' + paragraph_html(note["brief"]) + "</div>"
+        ),
         "NAVIGATION": "".join(navigation),
         "SECTIONS": "".join(sections),
         "ORIGINAL_LINK": original_link,
@@ -600,44 +697,8 @@ class ReadingNotes:
     def complete_note(self, note, plan, inventory, paper_id, workspace, fingerprint, images):
         note = self.repair_connectives(normalize_data_record(note), workspace)
         validate_note(note, plan, paper_id, inventory["page_count"], 1)
-        for attempt in range(1, 3):
-            current = body_character_count(note)
-            if current >= self.config.reading_notes_min_chars:
-                break
-            target = int((self.config.reading_notes_min_chars - current) * 1.5) + 1000
-            LOGGER.info(
-                "补充笔记中的实质技术分析：已有 %s 字符，要求 %s",
-                current,
-                self.config.reading_notes_min_chars,
-            )
-            completion = workspace / f"completion-{attempt}"
-            additions = self._ask(
-                "reading-note-expand.md",
-                NOTE_EXPANSION_SCHEMA,
-                completion,
-                images,
-                current_chars=current,
-                min_chars=self.config.reading_notes_min_chars,
-                min_extra_chars=target,
-                inventory_json=json.dumps(inventory, ensure_ascii=False),
-                plan_json=json.dumps(plan, ensure_ascii=False),
-                note_json=json.dumps(note, ensure_ascii=False),
-            )
-            note = append_note_paragraphs(note, additions.get("sections", []))
-            note = self.repair_connectives(note, completion)
-            validate_note(note, plan, paper_id, inventory["page_count"], 1)
-            atomic_write(
-                workspace / "draft.json",
-                json.dumps(
-                    {
-                        "version": 1,
-                        "pdf_sha256": fingerprint,
-                        "plan": plan,
-                        "note": note,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
+        # Length is only an incomplete-output guard. Never commission extra prose
+        # just to hit a character quota; the reader needs an argument, not padding.
         validate_note(
             note, plan, paper_id, inventory["page_count"], self.config.reading_notes_min_chars
         )
@@ -779,6 +840,26 @@ class ReadingNotes:
                 raise ReadingNoteError(
                     f"完整阅读笔记两次生成/验收失败，保留状态等待重试：{feedback}"
                 )
+        if "reading_guide" not in cache["note"]:
+            guide = self._ask(
+                "reading-note-guide.md",
+                READING_GUIDE_SCHEMA,
+                workspace,
+                [],
+                inventory_json=json.dumps(inventory, ensure_ascii=False),
+                note_json=json.dumps(cache["note"], ensure_ascii=False),
+            )
+            updated = copy.deepcopy(cache["note"])
+            updated["reading_guide"] = guide
+            updated = self.repair_connectives(updated, workspace)
+            validate_note(
+                updated,
+                cache["plan"],
+                paper.id,
+                inventory["page_count"],
+                self.config.reading_notes_min_chars,
+            )
+            cache["note"] = updated
         atomic_write(cache_path, json.dumps(cache, ensure_ascii=False, indent=2))
         crops = crop_artifacts(pdf, cache["plan"], workspace)
         document = render_note(cache["note"], cache["plan"], crops, paper)

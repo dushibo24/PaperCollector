@@ -30,6 +30,19 @@ SECTION_IDS = (
     "experiments",
     "source-discrepancies",
 )
+# The guide is a reading argument, not another abstract or a bag of metrics.
+READING_GUIDE_SCHEMA = object_schema(
+    {
+        "problem": PARAGRAPH,
+        "insight": PARAGRAPH,
+        "mechanism": array_schema(object_schema({"title": TEXT, "explanation": PARAGRAPH})),
+        "findings": array_schema(
+            object_schema({"title": TEXT, "result": PARAGRAPH, "boundary": PARAGRAPH})
+        ),
+        "takeaway": PARAGRAPH,
+    }
+)
+SECTION_PARAGRAPH = object_schema({**PARAGRAPH["properties"], "heading": TEXT})
 PLAN_SCHEMA = object_schema(
     {
         "artifacts": array_schema(
@@ -58,12 +71,13 @@ NOTE_SCHEMA = object_schema(
         "title_zh": TEXT,
         "subtitle": TEXT,
         "brief": PARAGRAPH,
+        "reading_guide": READING_GUIDE_SCHEMA,
         "sections": array_schema(
             object_schema(
                 {
                     "id": {"type": "string", "enum": list(SECTION_IDS)},
                     "title": TEXT,
-                    "paragraphs": array_schema(PARAGRAPH),
+                    "paragraphs": array_schema(SECTION_PARAGRAPH),
                 }
             )
         ),
@@ -77,6 +91,8 @@ NOTE_SCHEMA = object_schema(
                         "enum": ["technical", "evaluation-protocol", "experiments"],
                     },
                     "crop_verified": {"type": "boolean"},
+                    "headline": TEXT,
+                    "importance": {"type": "string", "enum": ["core", "supporting"]},
                     "paper_claim": PARAGRAPH,
                     "analysis": PARAGRAPH,
                     "axes": PARAGRAPH,
@@ -114,7 +130,7 @@ NOTE_EXPANSION_SCHEMA = object_schema(
             object_schema(
                 {
                     "id": {"type": "string", "enum": list(SECTION_IDS)},
-                    "paragraphs": array_schema(PARAGRAPH),
+                    "paragraphs": array_schema(SECTION_PARAGRAPH),
                 }
             )
         )

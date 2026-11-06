@@ -104,28 +104,19 @@ def test_record_normalization_does_not_mutate_the_model_response(notes_inputs):
     assert json.loads(normalized["data_record"]["json"]) == {"input": "demonstration only"}
 
 
-def test_short_note_is_completed_by_adding_source_cited_paragraphs_only(notes_inputs):
+def test_short_note_is_rejected_without_commissioning_padding(notes_inputs):
     config, paper, _, _, workspace, inventory, plan, note = notes_inputs
     original = copy.deepcopy(note)
     config.reading_notes_min_chars = body_character_count(note) + 1000
-    new_paragraph = {
-        "text": "补充分析，逐步解释方法假设与评价边界。" * 100,
-        "pages": [1],
-        "kind": "analysis",
-    }
 
-    class ExpansionAgent:
-        def _run(self, _prompt, schema, _output, **_kwargs):
-            assert schema.name == "reading-note-expand.schema.json"
-            return {"sections": [{"id": "technical", "paragraphs": [new_paragraph]}]}
+    class MustNotExpand:
+        def _run(self, *_args, **_kwargs):
+            raise AssertionError("Never add prose to meet a length quota")
 
-    result = ReadingNotes(config, ExpansionAgent()).complete_note(
-        note, plan, inventory, paper.id, workspace, "source-hash", []
-    )
-    assert body_character_count(result) >= config.reading_notes_min_chars
-    assert result["artifacts"] == original["artifacts"]
-    assert result["data_record"] == original["data_record"]
-    assert result["sections"][4]["paragraphs"][:-1] == original["sections"][4]["paragraphs"]
+    with pytest.raises(ReadingNoteError, match="正文长度"):
+        ReadingNotes(config, MustNotExpand()).complete_note(
+            note, plan, inventory, paper.id, workspace, "source-hash", []
+        )
     assert note == original
 
 
@@ -244,6 +235,23 @@ def notes_inputs(config, tmp_path):
         "title_zh": "实测证据",
         "subtitle": "从设置解释观测差异",
         "brief": copy.deepcopy(paragraph),
+        "reading_guide": {
+            "problem": copy.deepcopy(paragraph),
+            "insight": copy.deepcopy(paragraph),
+            "mechanism": [
+                {"title": f"机制步骤 {index}", "explanation": copy.deepcopy(paragraph)}
+                for index in range(2)
+            ],
+            "findings": [
+                {
+                    "title": f"核心发现 {index}",
+                    "result": copy.deepcopy(paragraph),
+                    "boundary": copy.deepcopy(paragraph),
+                }
+                for index in range(2)
+            ],
+            "takeaway": copy.deepcopy(paragraph),
+        },
         "sections": [
             {"id": identity, "title": identity, "paragraphs": [copy.deepcopy(paragraph)]}
             for identity in SECTION_IDS
@@ -351,7 +359,7 @@ def test_note_is_self_contained_mobile_friendly_and_escapes_untrusted_text(notes
     assert 'name="viewport"' in document
     assert 'id="reading-progress"' in document
     assert 'class="data-record"' in document
-    assert 'class="story-chain"' in document
+    assert 'class="mechanism-chain"' in document
     assert 'class="tech-step"' in document
     assert "字段/记录为解释性重构" in document
     for identity in SECTION_IDS:
@@ -462,3 +470,85 @@ def test_failed_vps_publication_retries_from_validated_cache_without_model_calls
     _, url = publisher.ensure(paper, review, pdf, directory)
     assert len(calls) == 2
     assert uploads[0] == uploads[1] == url.rsplit("/", 1)[-1]
+
+
+def test_reading_hierarchy_keeps_main_argument_before_supplementary_audits(notes_inputs):
+    _, paper, _, pdf, workspace, _, plan, note = notes_inputs
+    technical = next(section for section in note["sections"] if section["id"] == "technical")
+    technical["paragraphs"][0]["heading"] = "关键变化 <不是标签>"
+    technical["supporting_paragraphs"] = [
+        {"text": "补充推导保留在按需展开的细节中", "pages": [1], "kind": "analysis"}
+    ]
+    document = render_note(note, plan, crop_artifacts(pdf, plan, workspace), paper)
+    positions = [
+        document.index(f'id="{identity}"')
+        for identity in (
+            "reading-guide",
+            "story",
+            "technical",
+            "experiments",
+            "writing",
+            "metadata",
+        )
+    ]
+    assert positions == sorted(positions)
+    assert '<details id="metadata" class="appendix">' in document
+    assert '<details id="writing" class="appendix">' in document
+    assert '<section id="technical">' in document
+    assert "关键变化 &lt;不是标签&gt;" in document
+    assert "补充推导保留在按需展开的细节中" in document
+    assert "完整证据综合表（逐项核对）" in document
+    assert "输入输出实例与逐字段解释" in document
+    assert 'class="story-chain"' not in document  # no truncated first-sentence pseudo-summary
+
+
+@pytest.mark.parametrize("field", ["problem", "insight", "takeaway"])
+def test_reading_guide_requires_valid_evidence_pages(notes_inputs, field):
+    *_, plan, note = notes_inputs
+    note["reading_guide"][field]["pages"] = [2]
+    with pytest.raises(ReadingNoteError, match="页码"):
+        validate_note(note, plan, note["paper_id"], 1, 1)
+
+
+def test_reading_guide_limits_the_number_of_headline_findings(notes_inputs):
+    *_, plan, note = notes_inputs
+    note["reading_guide"]["findings"] *= 3
+    with pytest.raises(ReadingNoteError, match="核心证据"):
+        validate_note(note, plan, note["paper_id"], 1, 1)
+
+
+def test_legacy_cache_gets_only_a_guide_and_keeps_original_url_and_details(notes_inputs):
+    config, paper, review, pdf, _, _, plan, note = notes_inputs
+    directory = config.knowledge_base_dir / "papers" / "test"
+    guide = note.pop("reading_guide")
+    legacy_note = copy.deepcopy(note)
+    cache_path = directory / "reading-note" / "validated.json"
+    cache_path.parent.mkdir(parents=True)
+    filename = "1" * 32 + ".html"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+                "plan": plan,
+                "note": note,
+                "public_filename": filename,
+            }
+        )
+    )
+    calls = []
+
+    class GuideOnlyAgent:
+        def _run(self, _prompt, schema, _output, **_kwargs):
+            calls.append(schema.name)
+            assert schema.name == "reading-note-guide.schema.json"
+            return copy.deepcopy(guide)
+
+    notes = ReadingNotes(config, GuideOnlyAgent())
+    _, url = notes.ensure(paper, review, pdf, directory)
+    assert url.endswith(filename)
+    updated = json.loads(cache_path.read_text())["note"]
+    assert updated.pop("reading_guide") == guide
+    assert updated == legacy_note
+    notes.ensure(paper, review, pdf, directory)
+    assert calls == ["reading-note-guide.schema.json"]
