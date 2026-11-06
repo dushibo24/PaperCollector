@@ -1,4 +1,5 @@
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +13,18 @@ import pytest
 def test_deployment_scripts_have_valid_bash_syntax(name):
     script = Path(__file__).parents[1] / "deploy" / name
     subprocess.run(["bash", "-n", str(script)], check=True)
+
+
+def test_cron_installer_schedules_one_daily_run_at_beijing_nine():
+    source = Path(__file__).parents[1] / "deploy" / "install-cron.sh"
+    script = source.read_text()
+    entries = [line for line in script.splitlines() if line.startswith("0 ")]
+    assert len(entries) == 1
+    assert shlex.split(entries[0]) == [
+        "0", "9", "*", "*", "*", "root", "/bin/bash", "$repo_root/deploy/run-scheduled.sh"
+    ]
+    assert '"$(date +%z)" != +0800' in script
+    assert "Every day at 09:00 (Asia/Shanghai)" in script
 
 
 def test_scheduled_runner_uses_project_environment_and_private_logs(tmp_path):

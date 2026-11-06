@@ -20,7 +20,7 @@ def test_load_config_resolves_data_dir(config_file: Path):
     assert config.diversity_history_days == 7
     assert config.diversity_penalty == 1.5
     assert config.reading_notes_enabled is False
-    assert config.reading_notes_min_chars == 30000
+    assert config.reading_notes_min_chars == 1000
     assert config.translation_skip_subset_fonts is False
     assert config.reading_notes_dir == config.data_dir / "public_notes"
 

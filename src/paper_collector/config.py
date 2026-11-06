@@ -77,7 +77,7 @@ class AppConfig:
     reading_notes_host: str = "127.0.0.1"
     reading_notes_port: int = 8765
     reading_notes_timeout_seconds: int = 1800
-    reading_notes_min_chars: int = 30000
+    reading_notes_min_chars: int = 1000
     reading_notes_publish_ssh_host: str = ""
     reading_notes_publish_ssh_directory: str = ""
     reading_notes_publish_ssh_port: int | None = None
@@ -289,7 +289,7 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("启用阅读笔记需要配置 reading_notes.public_base_url / READING_NOTES_BASE_URL")
     notes_port = int(reading_notes.get("port", 8765))
     notes_timeout = int(reading_notes.get("timeout_seconds", 1800))
-    notes_min_chars = int(reading_notes.get("min_chars", 30000))
+    notes_min_chars = int(reading_notes.get("min_chars", 1000))
     if not 1 <= notes_port <= 65535:
         raise ConfigError("reading_notes.port 必须在 1 到 65535 之间")
     if notes_timeout <= 0 or not 1000 <= notes_min_chars <= 80000:

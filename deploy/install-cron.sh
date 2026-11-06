@@ -27,8 +27,8 @@ SHELL=/bin/bash
 HOME=/root
 PATH=/root/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MAILTO=""
-0 9 * * 2,4,5 root /bin/bash "$repo_root/deploy/run-scheduled.sh"
+0 9 * * * root /bin/bash "$repo_root/deploy/run-scheduled.sh"
 EOF
 chmod 644 /etc/cron.d/paper-collector
 service cron start
-printf 'Installed: Tuesday, Thursday, Friday at 09:00 (Asia/Shanghai).\n'
+printf 'Installed: Every day at 09:00 (Asia/Shanghai).\n'
