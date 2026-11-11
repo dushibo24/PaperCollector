@@ -665,6 +665,7 @@ class ReadingNotes:
     def __init__(self, config: AppConfig, agent: CodexAgent):
         self.config = config
         self.agent = agent
+        self._preferred_model = None
 
     def _ask(self, template: str, schema: dict[str, Any], workspace: Path, images, **values):
         prompt = (self.config.repo_root / "prompts" / template).read_text(encoding="utf-8")
@@ -673,13 +674,43 @@ class ReadingNotes:
         schema_path = workspace / f"{stem}.schema.json"
         atomic_write(schema_path, json.dumps(schema, ensure_ascii=False))
         atomic_write(workspace / f"{stem}.prompt.txt", prompt)
-        return self.agent._run(
-            prompt,
-            schema_path,
-            workspace / f"{stem}.result.json",
-            images=images,
-            timeout_seconds=self.config.reading_notes_timeout_seconds,
+        configured = self.config.reading_notes_model or self.config.codex_model
+        models = list(
+            dict.fromkeys(
+                [self._preferred_model or configured, configured]
+                + self.config.reading_notes_fallback_models
+            )
         )
+        routed = bool(self.config.reading_notes_model or self.config.reading_notes_fallback_models)
+        for index, model in enumerate(models):
+            try:
+                options = {"model_override": model} if routed and model else {}
+                result = self.agent._run(
+                    prompt,
+                    schema_path,
+                    workspace / f"{stem}.result.json",
+                    images=images,
+                    timeout_seconds=self.config.reading_notes_timeout_seconds,
+                    **options,
+                )
+            except AgentError as exc:
+                if index == len(models) - 1:
+                    if len(models) == 1:
+                        raise
+                    raise AgentUnavailableError(
+                        "已配置的笔记模型均未完成请求，保留缓存等待恢复"
+                    ) from exc
+                LOGGER.warning(
+                    "笔记模型 %s 调用失败（%s），切换已配置的备用模型",
+                    model or "默认",
+                    type(exc).__name__,
+                )
+                continue
+            self._preferred_model = model
+            if routed:
+                LOGGER.info("笔记阶段 %s 使用模型：%s", stem, model or "默认")
+            return result
+        raise AgentUnavailableError("没有可用笔记模型")
 
     def repair_connectives(self, note: dict[str, Any], workspace: Path) -> dict[str, Any]:
         passages = banned_passages(note)
@@ -777,22 +808,47 @@ class ReadingNotes:
         if cache is None:
             cache = self._recover_draft(workspace, fingerprint, inventory, paper.id, pdf)
         if cache is None:
+            planned_path = workspace / "planned.json"
+            saved_plan = None
+            if planned_path.exists():
+                try:
+                    candidate = json.loads(planned_path.read_text())
+                    if candidate.get("pdf_sha256") == fingerprint and candidate.get("version") == 1:
+                        validate_plan(candidate["plan"], inventory)
+                        saved_plan = candidate["plan"]
+                except (OSError, ValueError, TypeError, KeyError, ReadingNoteError):
+                    pass
             feedback = ""
             for attempt in range(1, 3):
                 attempt_dir = workspace / f"attempt-{attempt}"
                 attempt_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    plan = self._ask(
-                        "reading-note-plan.md",
-                        PLAN_SCHEMA,
-                        attempt_dir,
-                        previews,
-                        paper_json=json.dumps(paper.to_dict(), ensure_ascii=False),
-                        inventory_json=json.dumps(inventory, ensure_ascii=False),
-                        feedback=feedback,
-                    )
+                    if attempt == 1 and saved_plan is not None:
+                        plan = saved_plan
+                        LOGGER.info("复用已绑定原 PDF 的图表规划，不重复调用模型")
+                    else:
+                        plan = self._ask(
+                            "reading-note-plan.md",
+                            PLAN_SCHEMA,
+                            attempt_dir,
+                            previews,
+                            paper_json=json.dumps(paper.to_dict(), ensure_ascii=False),
+                            inventory_json=json.dumps(inventory, ensure_ascii=False),
+                            feedback=feedback,
+                        )
                     validate_plan(plan, inventory)
                     crops = crop_artifacts(pdf, plan, workspace)
+                    atomic_write(
+                        planned_path,
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "pdf_sha256": fingerprint,
+                                "plan": plan,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
                     sheets = contact_sheets(crops, workspace)
                     note = self._ask(
                         "reading-note.md",
@@ -839,6 +895,8 @@ class ReadingNotes:
                 except AgentUnavailableError:
                     raise
                 except (ReadingNoteError, AgentError) as exc:
+                    planned_path.unlink(missing_ok=True)
+                    saved_plan = None
                     feedback = str(exc)
             if cache is None:
                 raise ReadingNoteError(

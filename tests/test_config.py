@@ -220,3 +220,11 @@ def test_healthy_translation_budget_exceeds_observed_nineteen_minute_paper(confi
     assert config.translation_attempt_timeout_seconds >= 19 * 60
     assert config.translation_chunk_timeout_seconds < config.translation_attempt_timeout_seconds
     assert config.translation_attempt_timeout_seconds < config.translation_timeout_seconds
+
+
+@pytest.mark.parametrize("models", ['[""]', '"not-an-array"', '["one","two","three"]'])
+def test_invalid_note_fallback_routes_are_rejected(config_file, models):
+    with config_file.open("a") as handle:
+        handle.write(f"\n[reading_notes]\nfallback_models = {models}\n")
+    with pytest.raises(ConfigError, match="fallback_models"):
+        load_config(config_file)

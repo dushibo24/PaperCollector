@@ -112,3 +112,24 @@ def test_untrusted_prompt_echo_does_not_turn_an_unsupported_model_into_transient
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
     assert not isinstance(error.value, AgentUnavailableError)
     assert not sleeps
+
+
+def test_note_model_override_does_not_modify_main_agent_configuration(
+    config, tmp_path, monkeypatch
+):
+    config.codex_model = "main-review-model"
+    commands = []
+    output = tmp_path / "out.json"
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        output.write_text('{"ok":true}')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
+    agent = CodexAgent(config)
+    agent._run("note", tmp_path / "schema", output, model_override="note-model")
+    agent._run("review", tmp_path / "schema", output)
+    assert commands[0][commands[0].index("--model") + 1] == "note-model"
+    assert commands[1][commands[1].index("--model") + 1] == "main-review-model"
+    assert config.codex_model == "main-review-model"

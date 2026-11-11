@@ -347,6 +347,8 @@ discovered → ranked → reviewed → translated → shared → delivering → 
   `max_deep_reviews` 是每轮实际全文审读次数上限，下载失败不消耗它；已达标的缓存论文优先交付。
   搜索轮数耗尽仍无结果才发送状态说明，不能把单轮落空称为没有论文，也不会为凑每日推送降低门槛。
 - 模型临时高负载、限流或连接中断：同一请求按 30、90、180 秒退避重试，全部尝试共用配置的超时预算。
+  `[reading_notes].model` 可单独指定笔记模型，`fallback_models` 可配置最多两个已核验模型。
+  请求失败后切换备用模型，并优先复用本轮成功的模型；精排和审读仍使用原 agent 模型，图表及证据验收不变。
   这类故障不当作论文不合格，也不重新生成已完成的译文；不支持的模型等配置错误不做无效重试。
 - 仅用已有候选池补跑：`run --skip-discovery` 仍会换批审读，但不再次调用抓取源；日常任务会按需扩大搜索。
 - 相邻主题仍太像：提高 `agent.diversity_penalty` 或扩大 `agent.diversity_history_days`；若轮换过强则反向调低。
