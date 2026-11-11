@@ -897,3 +897,76 @@ def test_total_run_budget_releases_lock_and_preserves_ready_paper_for_recovery(c
         assert pipeline.run(no_notify=True) == paper.id
     finally:
         pipeline.close()
+
+
+def test_budget_cannot_interrupt_between_notification_and_persisted_receipt(
+    config, monkeypatch, tmp_path
+):
+    import time
+
+    from paper_collector.pipeline import execution_budget
+
+    config.notify_channel = "serverchan"
+    config.serverchan_sendkey = "SCTtest"
+    pipeline = Pipeline(config)
+    paper = make_paper("receipt-critical-section")
+    pipeline.db.upsert_paper(paper)
+    pipeline.db.save_review(paper.id, make_review(paper.id))
+    pipeline.db.save_share(paper.id, "/paper.zip", "https://example.test/share", "1234")
+
+    class SlowNotifier:
+        def __init__(self, _key):
+            pass
+
+        def send(self, *_args):
+            time.sleep(0.15)  # Receipt arrives after the overall task deadline.
+
+    monkeypatch.setattr("paper_collector.pipeline.ServerChanNotifier", SlowNotifier)
+    try:
+        with execution_budget(0.05):
+            pipeline._deliver(paper, make_review(paper.id), tmp_path / "paper.zip")
+        assert pipeline.db.work_row(paper.id)["file_delivered_at"] is not None
+    finally:
+        pipeline.close()
+
+
+def test_later_round_searches_fresh_batch_not_the_same_ranked_out_papers(config, monkeypatch):
+    config.max_search_rounds = 2
+    config.max_deep_reviews = 1
+    pipeline = Pipeline(config)
+    papers = [make_paper(f"fresh-{i}") for i in range(10)]
+    for index, paper in enumerate(papers):
+        paper.doi = None
+        paper.title = f"Fresh candidate {index}"
+        paper.pdf_url = f"https://example.test/{index}.pdf"
+        pipeline.db.upsert_paper(paper)
+    batches = []
+
+    def prepare(**kwargs):
+        return [p for p in papers if p.id not in kwargs.get("exclude_ids", set())][:4]
+
+    def rank(candidates, _directory):
+        batches.append([p.id for p in candidates])
+        return [{"paper_id": candidates[0].id, "rank": 1}]
+
+    def download(_url, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF-placeholder")
+        return target
+
+    def reject(paper, *_args):
+        result = make_review(paper.id)
+        result.recommend = False
+        result.rejection_reason = "insufficient evidence"
+        return result
+
+    monkeypatch.setattr(pipeline, "_prepare_candidates", prepare)
+    monkeypatch.setattr(pipeline.agent, "rank", rank)
+    monkeypatch.setattr(pipeline.agent, "review", reject)
+    monkeypatch.setattr("paper_collector.pipeline.download_pdf", download)
+    monkeypatch.setattr("paper_collector.pipeline.extract_text", lambda _p: "full text")
+    try:
+        assert pipeline.run(no_notify=True, skip_discovery=True) is None
+        assert batches == [[f"fresh-{i}" for i in range(4)], [f"fresh-{i}" for i in range(4, 8)]]
+    finally:
+        pipeline.close()

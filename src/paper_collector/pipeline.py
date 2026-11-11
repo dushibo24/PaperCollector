@@ -65,6 +65,7 @@ def execution_budget(seconds):
     def exceeded(_signal, _frame):
         raise RunBudgetExceeded(f"任务总运行预算 {seconds}s 已耗尽；保留缓存，等待定时恢复")
 
+    exceeded._paper_collector_budget = True
     previous_handler = signal.signal(signal.SIGALRM, exceeded)
     previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
     started = time.monotonic()
@@ -76,6 +77,18 @@ def execution_budget(seconds):
         if previous_timer[0] > 0:
             remaining = max(0.001, previous_timer[0] - (time.monotonic() - started))
             signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
+
+
+def _finish_receipt_without_budget_interrupt():
+    """Don't cut between an accepted notification and persisting its receipt.
+
+    Send operations already have their own short network timeouts. Both success
+    and notification failure end the run, so no search continues after disarming.
+    """
+    if hasattr(signal, "setitimer") and getattr(
+        signal.getsignal(signal.SIGALRM), "_paper_collector_budget", False
+    ):
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 @contextmanager
@@ -539,6 +552,7 @@ class Pipeline:
                 self.db.save_share(paper.id, share.remote_path, share.url, share.password)
                 share_url = share.url
                 share_password = share.password
+            _finish_receipt_without_budget_interrupt()
             ServerChanNotifier(self.config.serverchan_sendkey).send(
                 f"今日论文｜{review.title_zh}",
                 brief_for_serverchan(paper, review, share_url, share_password or "", note_url),
@@ -555,8 +569,10 @@ class Pipeline:
             notifier = WeComNotifier(self.config.wecom_webhook_key)
             summary_done = bool(row["summary_delivered_at"])
             if not summary_done:
+                _finish_receipt_without_budget_interrupt()
                 notifier.send_markdown(brief_for_wecom(paper, review, note_url))
                 self.db.mark_summary_delivered(paper.id)
+            _finish_receipt_without_budget_interrupt()
             notifier.send_file(package)
             self.db.mark_file_delivered(paper.id)
             return
@@ -685,6 +701,7 @@ class Pipeline:
                 run_dir = self.config.data_dir / "runs" / f"{run_id}-{stamp}"
                 run_dir.mkdir(parents=True, exist_ok=True)
                 attempted: set[str] = set()
+                screened: set[str] = set()
                 completed_reviews = 0
                 review_errors = 0
                 had_candidates = False
@@ -692,12 +709,13 @@ class Pipeline:
                     # A later round changes both the API search and the local batch.
                     if not skip_discovery and search_round > 1 and search_round % 2 == 0:
                         self.discover(run_id, expansion=search_round // 2)
+                    excluded = attempted | screened
                     candidates = (
                         self._prepare_candidates()
-                        if not attempted
-                        else self._prepare_candidates(exclude_ids=attempted)
+                        if not excluded
+                        else self._prepare_candidates(exclude_ids=excluded)
                     )
-                    candidates = [paper for paper in candidates if paper.id not in attempted]
+                    candidates = [paper for paper in candidates if paper.id not in excluded]
                     had_candidates = had_candidates or bool(candidates)
                     round_dir = run_dir if search_round == 1 else run_dir / f"search-{search_round}"
                     round_dir.mkdir(parents=True, exist_ok=True)
@@ -724,8 +742,12 @@ class Pipeline:
                         self.db.finish_run(run_id, "dry-run", selected_id)
                         return selected_id
                     if not ranked:
-                        attempted.update(paper.id for paper in candidates)
+                        screened.update(paper.id for paper in candidates)
                         continue
+                    selected_ids = {item["paper_id"] for item in ranked}
+                    screened.update(
+                        paper.id for paper in candidates if paper.id not in selected_ids
+                    )
                     by_id = {paper.id: paper for paper in candidates}
                     deep_review_attempts = 0
                     for rank_context in ranked:
