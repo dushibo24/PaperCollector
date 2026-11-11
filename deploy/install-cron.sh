@@ -28,7 +28,9 @@ HOME=/root
 PATH=/root/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MAILTO=""
 0 9 * * * root /bin/bash "$repo_root/deploy/run-scheduled.sh"
+15,45 9-20 * * * root /bin/bash "$repo_root/deploy/run-scheduled.sh" --skip-discovery
+55 20 * * * root /bin/bash "$repo_root/deploy/run-scheduled.sh" --check-delivery
 EOF
 chmod 644 /etc/cron.d/paper-collector
 service cron start
-printf 'Installed: Every day at 09:00 (Asia/Shanghai).\n'
+printf 'Installed: Every day at 09:00 (Asia/Shanghai); recovery every 30 minutes until 20:45.\n'

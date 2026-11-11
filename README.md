@@ -134,7 +134,11 @@ uv run paper-collector doctor --config config.toml
 sudo bash deploy/install-cron.sh
 ```
 
-任务写入 `/etc/cron.d/paper-collector`，每天 09:00 启动，每次最多推送一篇。
+任务写入 `/etc/cron.d/paper-collector`，每天 09:00 启动；09:15–20:45 每半小时自动恢复一次。
+定时任务在进程锁内核查北京时间当天的完整投递记录，成功后不再重复发送；并发恢复检查直接跳过。
+20:55 独立核查当天是否完整投递，未完成则告警，不把“任务运行中”当作成功。
+任务失败或本轮暂无合格论文时，通过已配置的通知渠道发送状态说明，不再静默结束；状态通知不会记作论文投递。
+修复服务配置后，可执行 `uv run paper-collector run --skip-discovery` 使用本地候选池补跑，避免重复抓取。
 全文审读、翻译和上传需要时间，微信实际送达会晚于启动时间。
 日志按日期保存在 `data/logs/cron-YYYY-MM-DD.log`，运行不依赖 SSH 会话。
 迁移部署时应同时迁移 `data/`，保留已推送记录和知识库队列，避免重复推荐；
@@ -337,15 +341,23 @@ discovered → ranked → reviewed → translated → shared → delivering → 
 - 推荐太泛：缩窄 `description`，加入短语型 `keywords` 和 `negative_keywords`。
 - 小同行论文被 venue 压制：确认使用 `scope = "niche"`，可提高 `weight`。
 - 大同行水文太多：提高 `min_recommendation_score`，完善顶会表，并在描述中明确不可接受的实验缺陷。
-- PDF 来源临时返回 403/502：流水线会继续尝试精排榜单中的下一篇，直到完成配置数量的全文审读尝试；
-  同一篇无需重新筛选。若整份 `shortlist_size` 中的 PDF 都不可下载，或论文未达到推荐质量阈值，则跳过本次推送，不生成虚假推荐。
-- 每天没有论文：扩大 `recent_days` / `evergreen_years`，增加关键词或扩大 `shortlist_size`；
-  `max_deep_reviews` 限定的是实际全文审读尝试数，不需要用来补偿下载失败。
+- PDF 下载失败或论文不合格：本轮继续下一篇；整批失败就换候选批次，不重复处理已尝试论文。
+  默认最多进行 `agent.max_search_rounds = 6` 轮，第 2、4、6 轮扩大近期 API 搜索的时间窗、结果数及关键词切片。
+  `max_deep_reviews` 是每轮实际全文审读次数上限，下载失败不消耗它；已达标的缓存论文优先交付。
+  搜索轮数耗尽仍无结果才发送状态说明，不能把单轮落空称为没有论文，也不会为凑每日推送降低门槛。
+- 模型临时高负载、限流或连接中断：同一请求按 30、90、180 秒退避重试，全部尝试共用配置的超时预算。
+  这类故障不当作论文不合格，也不重新生成已完成的译文；不支持的模型等配置错误不做无效重试。
+- 仅用已有候选池补跑：`run --skip-discovery` 仍会换批审读，但不再次调用抓取源；日常任务会按需扩大搜索。
 - 相邻主题仍太像：提高 `agent.diversity_penalty` 或扩大 `agent.diversity_history_days`；若轮换过强则反向调低。
 - pdf2zh 不稳定：在 `[translation]` 切换你已配置的 service。`google` 不需 key，但网络质量不可控。
 - `pdf2zh` 在 `subset_fonts` 阶段失败：自动使用已有译文缓存，以 `--skip-subset-fonts` 重试。
   也可设置 `[translation].skip_subset_fonts = true`，直接采用兼容模式；PDF 文件可能更大。
-- 双语 PDF 已完成、笔记或发送失败：下次先恢复这篇未完成的投递，不重复抓取和精排。
+- 翻译分段与续作：默认每段 5 页、每段最多 600 秒、单篇每次最多 900 秒；已完成段按原 PDF 指纹和翻译配置隔离并校验哈希与页数。
+  完整 65 页论文必须得到 130 页双语 PDF 才可合并交付，不会截断或把原文冒充译文。
+  翻译超时会终止整个子进程组，保留分段及脱敏诊断日志 `translated/segments/*/*/pdf2zh.log`。
+- 单篇下载、翻译或笔记验收失败：保留审读和缓存并换下一篇；该篇按 30 分钟起的指数冷却等待恢复，避免一篇反复阻塞整天。
+  双语 PDF 已完成时不重复翻译。通知阶段失败则优先恢复同一篇，部分通知已发送后不会擅自换篇。
+- 定时恢复核查：`paper-collector check-delivery` 可独立查询当天完整投递状态，未完成时发送去重告警。
   09:00 是任务启动时间，翻译和完整笔记完成后才发送；`data/logs/cron-YYYY-MM-DD.log` 会记录阶段进度。
 
 ## 开发

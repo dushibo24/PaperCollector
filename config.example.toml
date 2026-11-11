@@ -57,6 +57,8 @@ model = ""
 timeout_seconds = 900
 shortlist_size = 5
 max_deep_reviews = 3
+# 每轮候选都失败时换下一批；偶数轮扩大近期搜索，不降低审读门槛。
+max_search_rounds = 6
 # 选当天推送时参考最近 7 天，主题越重合降权越多，但不会覆盖论文质量门槛。
 diversity_history_days = 7
 diversity_penalty = 1.5
@@ -72,6 +74,10 @@ OPENAILIKED_MODEL = "${OPENAILIKED_MODEL}"
 threads = 4
 skip_subset_fonts = false
 timeout_seconds = 3600
+# 每篇每次最多占用 15 分钟，按 5 页分段缓存；恢复任务续作，不重译已完成段。
+chunk_pages = 5
+chunk_timeout_seconds = 600
+attempt_timeout_seconds = 900
 
 [notify]
 # 默认：Server酱把导读和百度网盘链接推送到个人微信。

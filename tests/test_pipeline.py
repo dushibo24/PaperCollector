@@ -2,7 +2,7 @@ import json
 import zipfile
 
 import pytest
-from test_db import make_review
+from test_db import make_paper, make_review
 
 from paper_collector.models import Author, Paper
 from paper_collector.notifiers import NotifyError
@@ -477,5 +477,388 @@ def test_queue_selection_penalizes_recently_repeated_topic(config):
 
         assert selected is not None
         assert json.loads(selected["paper_json"])["id"] == different.id
+    finally:
+        pipeline.close()
+
+
+def test_candidate_pool_reserves_recent_work_before_enrichment(config, monkeypatch):
+    from datetime import UTC, datetime
+
+    def fake_score(paper, _config):
+        paper.deterministic_score = 10.0 if paper.year == 2018 else 1.0
+        paper.matched_interests = ["LLM"]
+        return paper
+
+    pipeline = Pipeline(config)
+    monkeypatch.setattr("paper_collector.pipeline.score_paper", fake_score)
+    monkeypatch.setattr(pipeline.s2, "enrich", lambda paper: paper)
+    today = datetime.now(UTC).date()
+    try:
+        for index in range(240):
+            recent = index >= 210
+            paper = Paper(
+                id=f"pool-{index}",
+                title=f"Distinct candidate {index}",
+                abstract="large language models",
+                authors=[],
+                year=today.year if recent else 2018,
+                publication_date=today.isoformat() if recent else "2018-01-01",
+            )
+            pipeline.db.upsert_paper(paper)
+        # Simulate the last source updating old, highly cited classics last.
+        pipeline.db.connection.execute(
+            "UPDATE works SET updated_at='2099-01-01' WHERE id IN "
+            "(SELECT id FROM works WHERE CAST(SUBSTR(id, 6) AS INTEGER) < 210)"
+        )
+        pipeline.db.connection.commit()
+        selected = pipeline._prepare_candidates()
+        assert len(selected) == 20
+        assert sum(paper.year == today.year for paper in selected) == 15
+        assert sum(paper.year == 2018 for paper in selected) == 5
+        assert len({paper.id for paper in selected}) == len(selected)
+        second_batch = pipeline._prepare_candidates(exclude_ids={paper.id for paper in selected})
+        assert not {paper.id for paper in selected} & {paper.id for paper in second_batch}
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize("no_notify", [False, True])
+def test_empty_run_reports_status_without_claiming_paper_delivery(config, monkeypatch, no_notify):
+    config.notify_channel = "serverchan"
+    config.serverchan_sendkey = "SCTtest"
+    sent = []
+
+    class Notifier:
+        def __init__(self, _key):
+            pass
+
+        def send(self, title, content):
+            sent.append((title, content))
+
+    monkeypatch.setattr("paper_collector.pipeline.ServerChanNotifier", Notifier)
+    pipeline = Pipeline(config)
+    monkeypatch.setattr(pipeline, "discover", lambda _run_id: [])
+    monkeypatch.setattr(pipeline, "_prepare_candidates", list)
+    try:
+        assert pipeline.run(no_notify=no_notify) is None
+        assert len(sent) == (0 if no_notify else 1)
+        if sent:
+            assert "暂无合格论文" in sent[0][0]
+        run = pipeline.db.connection.execute("SELECT * FROM runs").fetchone()
+        assert run["status"] == "empty"
+        assert pipeline.db.stats().get("delivered", 0) == 0
+    finally:
+        pipeline.close()
+
+
+def test_failure_notice_does_not_expose_raw_errors_or_mask_original_failure(config, monkeypatch):
+    from paper_collector.codex_agent import AgentError
+
+    config.notify_channel = "serverchan"
+    config.serverchan_sendkey = "SCTtest"
+    sent = []
+
+    class BrokenNotifier:
+        def __init__(self, _key):
+            pass
+
+        def send(self, title, content):
+            sent.append((title, content))
+            raise NotifyError("notification endpoint unavailable")
+
+    monkeypatch.setattr("paper_collector.pipeline.ServerChanNotifier", BrokenNotifier)
+    pipeline = Pipeline(config)
+    monkeypatch.setattr(pipeline, "discover", lambda _run_id: [])
+    monkeypatch.setattr(pipeline, "_prepare_candidates", lambda: [make_paper("candidate")])
+
+    def failed_rank(*_args):
+        raise AgentError("private-provider-error?token=secret")
+
+    monkeypatch.setattr(pipeline.agent, "rank", failed_rank)
+    try:
+        with pytest.raises(AgentError, match="private-provider-error"):
+            pipeline.run()
+        assert len(sent) == 1
+        assert "任务失败" in sent[0][0]
+        assert "secret" not in str(sent)
+        assert pipeline.db.connection.execute("SELECT status FROM runs").fetchone()[0] == "failed"
+    finally:
+        pipeline.close()
+
+
+def test_unreadable_pdfs_are_failures_not_quality_rejections(config, monkeypatch):
+    paper = Paper(
+        id="unreadable",
+        title="Unreadable",
+        year=2026,
+        abstract="x",
+        authors=[],
+        publication_date="2026-11-10",
+        pdf_url="https://example.test/paper.pdf",
+    )
+    pipeline = Pipeline(config)
+    pipeline.db.upsert_paper(paper)
+    monkeypatch.setattr(pipeline, "discover", lambda _run_id: [])
+    monkeypatch.setattr(pipeline, "_prepare_candidates", lambda: [paper])
+    monkeypatch.setattr(pipeline.agent, "rank", lambda *_args: [{"paper_id": paper.id, "rank": 1}])
+
+    def broken_pdf(*_args):
+        raise PDFError("not a PDF")
+
+    monkeypatch.setattr("paper_collector.pipeline.download_pdf", broken_pdf)
+    try:
+        with pytest.raises(RuntimeError, match="均未能完成全文审读"):
+            pipeline.run(no_notify=True)
+        assert pipeline.db.connection.execute("SELECT status FROM runs").fetchone()[0] == "failed"
+    finally:
+        pipeline.close()
+
+
+def test_cached_recovery_skips_discovery_but_still_evaluates_candidates(config, monkeypatch):
+    pipeline = Pipeline(config)
+
+    def must_not_discover(*_args):
+        raise AssertionError("Cached recovery must not refetch sources")
+
+    monkeypatch.setattr(pipeline, "discover", must_not_discover)
+    monkeypatch.setattr(pipeline, "_prepare_candidates", list)
+    try:
+        assert pipeline.run(skip_discovery=True, no_notify=True) is None
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize("first_failure", ["rejected", "download", "empty-rank"])
+def test_search_continues_with_different_candidates_until_one_passes(
+    config, monkeypatch, first_failure
+):
+    config.max_search_rounds = 3
+    config.max_deep_reviews = 1
+    pipeline = Pipeline(config)
+    papers = [
+        Paper(
+            id=f"round-{i}",
+            title=f"New paper {i}",
+            abstract="x",
+            authors=[],
+            publication_date="2026-11-10",
+            year=2026,
+            pdf_url=f"https://example.test/{i}.pdf",
+        )
+        for i in range(3)
+    ]
+    for paper in papers:
+        pipeline.db.upsert_paper(paper)
+    searches = []
+    ranked_ids = []
+    reviewed = []
+    monkeypatch.setattr(
+        pipeline, "discover", lambda _run_id, **kwargs: searches.append(kwargs.get("expansion", 0))
+    )
+
+    def prepare(**kwargs):
+        excluded = kwargs.get("exclude_ids", set())
+        return [paper for paper in papers if paper.id not in excluded][:1]
+
+    def rank(candidates, _run_dir):
+        ranked_ids.extend(p.id for p in candidates)
+        if first_failure == "empty-rank" and candidates[0].id == "round-0":
+            return []
+        return [{"paper_id": candidates[0].id, "rank": 1}]
+
+    def download(_url, target):
+        if first_failure == "download" and target.parent.name == "round-0":
+            raise PDFError("HTTP 403")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF-placeholder")
+        return target
+
+    def review(paper, *_args):
+        reviewed.append(paper.id)
+        result = make_review(paper.id)
+        if first_failure == "rejected" and paper.id == "round-0":
+            result.recommend = False
+            result.rejection_reason = "Not enough evidence"
+        return result
+
+    monkeypatch.setattr(pipeline, "_prepare_candidates", prepare)
+    monkeypatch.setattr(pipeline.agent, "rank", rank)
+    monkeypatch.setattr(pipeline.agent, "review", review)
+    monkeypatch.setattr("paper_collector.pipeline.download_pdf", download)
+    monkeypatch.setattr("paper_collector.pipeline.extract_text", lambda _p: "full text")
+    try:
+        assert pipeline.run(no_notify=True) == "round-1"
+        assert ranked_ids == ["round-0", "round-1"]
+        assert len(ranked_ids) == len(set(ranked_ids))
+        assert searches == [0, 1]
+        assert reviewed[-1] == "round-1"
+        assert pipeline.db.work_row("round-2")["review_json"] is None
+    finally:
+        pipeline.close()
+
+
+def test_expanded_search_changes_window_keywords_and_result_budget(config, monkeypatch):
+    pipeline = Pipeline(config)
+    config.interests[0].keywords = [f"keyword-{i}" for i in range(12)]
+    settings = []
+    keywords = []
+
+    class ExpandedSource:
+        def __init__(self, expanded):
+            settings.append((expanded.recent_days, expanded.per_interest_limit))
+
+        def discover(self, interest):
+            keywords.append(interest.keywords)
+            return []
+
+    monkeypatch.setattr("paper_collector.pipeline.OpenAlexSource", ExpandedSource)
+    monkeypatch.setattr("paper_collector.pipeline.ArxivSource", ExpandedSource)
+    monkeypatch.setattr(
+        pipeline.official, "discover", lambda _interest: pytest.fail("Do not refetch archives")
+    )
+    try:
+        assert pipeline.discover(expansion=1) == []
+        assert settings == [(60, 10), (60, 10)]
+        assert keywords[0][:6] == [f"keyword-{i}" for i in range(6, 12)]
+        assert config.recent_days == 30 and config.per_interest_limit == 5
+    finally:
+        pipeline.close()
+
+
+def test_provider_outage_does_not_reject_or_replace_a_good_paper(config, monkeypatch):
+    from paper_collector.codex_agent import AgentUnavailableError
+
+    config.max_search_rounds = 3
+    pipeline = Pipeline(config)
+    paper = make_paper("provider-failed")
+    paper.pdf_url = "https://example.test/paper.pdf"
+    pipeline.db.upsert_paper(paper)
+    searches = []
+    monkeypatch.setattr(pipeline, "discover", lambda *_a, **_k: searches.append(1))
+    monkeypatch.setattr(pipeline, "_prepare_candidates", lambda **_kwargs: [paper])
+    monkeypatch.setattr(pipeline.agent, "rank", lambda *_a: [{"paper_id": paper.id, "rank": 1}])
+
+    def download(_url, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF-placeholder")
+        return target
+
+    def unavailable(*_args):
+        raise AgentUnavailableError("provider unavailable after retries")
+
+    monkeypatch.setattr("paper_collector.pipeline.download_pdf", download)
+    monkeypatch.setattr("paper_collector.pipeline.extract_text", lambda _p: "full text")
+    monkeypatch.setattr(pipeline.agent, "review", unavailable)
+    try:
+        with pytest.raises(AgentUnavailableError):
+            pipeline.run(no_notify=True)
+        assert searches == [1]
+        assert pipeline.db.work_row(paper.id)["rejected_reason"] is None
+    finally:
+        pipeline.close()
+
+
+def test_translation_failure_switches_to_another_ready_paper(config, monkeypatch, tmp_path):
+    pipeline = Pipeline(config)
+    papers = [make_paper(f"build-{i}") for i in range(2)]
+    for index, paper in enumerate(papers):
+        paper.doi = None
+        paper.title = f"Unique ready paper {index}"
+        pipeline.db.upsert_paper(paper)
+        review = make_review(paper.id)
+        review.overall_score = 9 - index
+        pipeline.db.save_review(paper.id, review)
+    attempted = []
+
+    def resume(row, *, no_notify):
+        attempted.append(row["id"])
+        if row["id"] == "build-0":
+            raise PDFError("pdf2zh timeout; chunks preserved")
+        assert no_notify
+        return row["id"]
+
+    monkeypatch.setattr(pipeline, "_resume_pending", resume)
+    monkeypatch.setattr(
+        pipeline,
+        "discover",
+        lambda *_a, **_k: pytest.fail("A ready alternative needs no new search"),
+    )
+    try:
+        assert pipeline.run(no_notify=True) == "build-1"
+        assert attempted == ["build-0", "build-1"]
+        failed = pipeline.db.work_row("build-0")
+        assert failed["delivery_retry_after"] and failed["rejected_reason"] is None
+        assert failed["review_json"]
+    finally:
+        pipeline.close()
+
+
+def test_failed_cached_delivery_does_not_prevent_searching_new_papers(config, monkeypatch):
+    pipeline = Pipeline(config)
+    paper = make_paper("broken-cache")
+    pipeline.db.upsert_paper(paper)
+    pipeline.db.save_review(paper.id, make_review(paper.id))
+    searched = []
+    monkeypatch.setattr(pipeline, "discover", lambda *_a, **_k: searched.append(1))
+    monkeypatch.setattr(pipeline, "_prepare_candidates", list)
+
+    def timeout(*_a, **_k):
+        raise PDFError("chunk timeout")
+
+    monkeypatch.setattr(pipeline, "_resume_pending", timeout)
+    try:
+        with pytest.raises(PDFError, match="未完成产物准备"):
+            pipeline.run(no_notify=True)
+        assert searched == [1]
+        assert pipeline.db.work_row(paper.id)["delivery_retry_after"]
+    finally:
+        pipeline.close()
+
+
+def test_scheduled_recovery_never_sends_a_second_paper_after_daily_success(config, monkeypatch):
+    pipeline = Pipeline(config)
+    paper = make_paper("today")
+    pipeline.db.upsert_paper(paper)
+    pipeline.db.save_review(paper.id, make_review(paper.id))
+    calls = []
+
+    def deliver(row, **_kwargs):
+        calls.append(row["id"])
+        pipeline.db.mark_link_delivered(row["id"])
+        return row["id"]
+
+    monkeypatch.setattr(pipeline, "_resume_pending", deliver)
+    monkeypatch.setattr(pipeline, "discover", lambda *_a, **_k: pytest.fail("Already delivered"))
+    try:
+        assert pipeline.run(scheduled=True) == paper.id
+        assert pipeline.run(scheduled=True) is None
+        assert pipeline.run(scheduled=True, skip_discovery=True) is None
+        assert calls == [paper.id]
+        assert pipeline.db.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    finally:
+        pipeline.close()
+
+
+def test_end_of_day_audit_checks_delivery_even_if_last_worker_is_still_running(config, monkeypatch):
+    config.notify_channel = "serverchan"
+    config.serverchan_sendkey = "SCTtest"
+    pipeline = Pipeline(config)
+    pipeline.db.start_run()  # Worker start is deliberately not treated as success.
+    sent = []
+
+    class Notifier:
+        def __init__(self, _key):
+            pass
+
+        def send(self, title, content):
+            sent.append((title, content))
+
+    monkeypatch.setattr("paper_collector.pipeline.ServerChanNotifier", Notifier)
+    try:
+        assert not pipeline.check_daily_delivery()
+        assert not pipeline.check_daily_delivery()
+        assert len(sent) == 1
+        assert "投递仍未完成" in sent[0][0]
+        assert pipeline.db.stats().get("delivered", 0) == 0
     finally:
         pipeline.close()
