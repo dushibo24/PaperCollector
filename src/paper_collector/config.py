@@ -78,6 +78,8 @@ class AppConfig:
     reading_notes_port: int = 8765
     reading_notes_timeout_seconds: int = 1800
     reading_notes_min_chars: int = 1000
+    reading_notes_model: str | None = None
+    reading_notes_fallback_models: list[str] = field(default_factory=list)
     reading_notes_publish_ssh_host: str = ""
     reading_notes_publish_ssh_directory: str = ""
     reading_notes_publish_ssh_port: int | None = None
@@ -306,6 +308,16 @@ def load_config(path: str | Path) -> AppConfig:
         )
     notes_port = int(reading_notes.get("port", 8765))
     notes_timeout = int(reading_notes.get("timeout_seconds", 1800))
+    notes_model = reading_notes.get("model") or None
+    notes_fallback_models = reading_notes.get("fallback_models", [])
+    if (notes_model is not None and not isinstance(notes_model, str)) or (
+        not isinstance(notes_fallback_models, list)
+        or len(notes_fallback_models) > 2
+        or any(not isinstance(model, str) or not model.strip() for model in notes_fallback_models)
+    ):
+        raise ConfigError(
+            "reading_notes.model 必须为模型名，fallback_models 最多包含两个非空模型名"
+        )
     notes_min_chars = int(reading_notes.get("min_chars", 1000))
     if not 1 <= notes_port <= 65535:
         raise ConfigError("reading_notes.port 必须在 1 到 65535 之间")
@@ -377,6 +389,8 @@ def load_config(path: str | Path) -> AppConfig:
         reading_notes_port=notes_port,
         reading_notes_timeout_seconds=notes_timeout,
         reading_notes_min_chars=notes_min_chars,
+        reading_notes_model=notes_model,
+        reading_notes_fallback_models=list(dict.fromkeys(notes_fallback_models)),
         reading_notes_publish_ssh_host=notes_ssh_host,
         reading_notes_publish_ssh_directory=notes_ssh_directory,
         reading_notes_publish_ssh_port=notes_ssh_port,

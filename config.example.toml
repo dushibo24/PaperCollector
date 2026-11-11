@@ -103,6 +103,9 @@ share_password = ""
 timeout_seconds = 1800
 
 [reading_notes]
+# 笔记可单独选择模型；留空沿用 agent.model。备用模型必须事先实测图像及 JSON 输出可用。
+model = ""
+fallback_models = []
 enabled = false
 public_base_url = "${READING_NOTES_BASE_URL}"
 host = "0.0.0.0"

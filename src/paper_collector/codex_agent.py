@@ -36,6 +36,7 @@ class CodexAgent:
         *,
         images: list[Path] | None = None,
         timeout_seconds: int | None = None,
+        model_override: str | None = None,
     ) -> dict[str, Any]:
         output.parent.mkdir(parents=True, exist_ok=True)
         command = [
@@ -56,8 +57,9 @@ class CodexAgent:
             "--output-last-message",
             str(output),
         ]
-        if self.config.codex_model:
-            command.extend(["--model", self.config.codex_model])
+        model = model_override or self.config.codex_model
+        if model:
+            command.extend(["--model", model])
         for image in images or []:
             command.extend(["--image", str(image.resolve())])
         command.append("-")

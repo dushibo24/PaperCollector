@@ -570,3 +570,86 @@ def test_provider_outage_preserves_paper_and_is_not_retried_as_a_bad_crop(notes_
         ReadingNotes(config, Unavailable()).ensure(paper, review, pdf, directory)
     assert calls == [1]
     assert not (directory / "阅读笔记.html").exists()
+
+
+def test_note_model_fallback_preserves_input_and_prefers_healthy_route(notes_inputs):
+    from paper_collector.codex_agent import AgentUnavailableError
+    from paper_collector.reading_note_schema import TEXT_REPAIR_SCHEMA
+
+    config, _, _, _, workspace, _, _, _ = notes_inputs
+    config.reading_notes_model = "unavailable-primary"
+    config.reading_notes_fallback_models = ["verified-backup"]
+    calls = []
+
+    class RoutedAgent:
+        def _run(self, prompt, _schema, _output, **kwargs):
+            calls.append((kwargs["model_override"], prompt, kwargs["images"]))
+            if kwargs["model_override"] == "unavailable-primary":
+                raise AgentUnavailableError("provider busy")
+            return {"edits": []}
+
+    notes = ReadingNotes(config, RoutedAgent())
+    for _ in range(2):
+        assert notes._ask(
+            "reading-note-repair.md", TEXT_REPAIR_SCHEMA, workspace, [], passages_json="[]"
+        ) == {"edits": []}
+    assert [model for model, _, _ in calls] == [
+        "unavailable-primary",
+        "verified-backup",
+        "verified-backup",
+    ]
+    assert calls[0][1:] == calls[1][1:]
+    assert config.codex_model != "verified-backup"
+
+
+def test_completed_plan_survives_provider_failure_during_writing(notes_inputs):
+    from paper_collector.codex_agent import AgentUnavailableError
+
+    config, paper, review, pdf, _, _, plan, note = notes_inputs
+    directory = config.knowledge_base_dir / "papers" / "cached-plan"
+    calls = []
+
+    class FailAfterPlan:
+        def _run(self, _prompt, schema, _output, **_kwargs):
+            calls.append(schema.name)
+            if "plan" in schema.name:
+                return copy.deepcopy(plan)
+            raise AgentUnavailableError("writing provider busy")
+
+    with pytest.raises(AgentUnavailableError):
+        ReadingNotes(config, FailAfterPlan()).ensure(paper, review, pdf, directory)
+    assert (directory / "reading-note/planned.json").is_file()
+
+    class RecoverWriter:
+        def _run(self, _prompt, schema, _output, **_kwargs):
+            calls.append(schema.name)
+            assert schema.name == "reading-note.schema.json"
+            return copy.deepcopy(note)
+
+    ReadingNotes(config, RecoverWriter()).ensure(paper, review, pdf, directory)
+    assert calls == [
+        "reading-note-plan.schema.json",
+        "reading-note.schema.json",
+        "reading-note.schema.json",
+    ]
+
+
+def test_all_note_routes_unavailable_is_not_reported_as_a_bad_paper(notes_inputs):
+    from paper_collector.codex_agent import AgentError, AgentUnavailableError
+    from paper_collector.reading_note_schema import TEXT_REPAIR_SCHEMA
+
+    config, _, _, _, workspace, *_ = notes_inputs
+    config.reading_notes_model = "primary"
+    config.reading_notes_fallback_models = ["backup"]
+    calls = []
+
+    class Unavailable:
+        def _run(self, *_args, **kwargs):
+            calls.append(kwargs["model_override"])
+            raise AgentError("model unavailable")
+
+    with pytest.raises(AgentUnavailableError, match="均未完成"):
+        ReadingNotes(config, Unavailable())._ask(
+            "reading-note-repair.md", TEXT_REPAIR_SCHEMA, workspace, [], passages_json="[]"
+        )
+    assert calls == ["primary", "backup"]
