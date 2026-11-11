@@ -76,10 +76,10 @@ OPENAILIKED_MODEL = "${OPENAILIKED_MODEL}"
 threads = 4
 skip_subset_fonts = false
 timeout_seconds = 3600
-# 每篇每次最多占用 15 分钟，按 5 页分段缓存；恢复任务续作，不重译已完成段。
+# 每篇每次最多占用 30 分钟，按 5 页分段缓存；恢复任务续作，不重译已完成段。
 chunk_pages = 5
 chunk_timeout_seconds = 600
-attempt_timeout_seconds = 900
+attempt_timeout_seconds = 1800
 
 [notify]
 # 默认：Server酱把导读和百度网盘链接推送到个人微信。

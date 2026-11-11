@@ -353,7 +353,7 @@ discovered → ranked → reviewed → translated → shared → delivering → 
 - pdf2zh 不稳定：在 `[translation]` 切换你已配置的 service。`google` 不需 key，但网络质量不可控。
 - `pdf2zh` 在 `subset_fonts` 阶段失败：自动使用已有译文缓存，以 `--skip-subset-fonts` 重试。
   也可设置 `[translation].skip_subset_fonts = true`，直接采用兼容模式；PDF 文件可能更大。
-- 翻译分段与续作：默认每段 5 页、每段最多 600 秒、单篇每次最多 900 秒；已完成段按原 PDF 指纹和翻译配置隔离并校验哈希与页数。
+- 翻译分段与续作：默认每段 5 页、每段最多 600 秒、单篇每次最多 1800 秒；已完成段按原 PDF 指纹和翻译配置隔离并校验哈希与页数。
   完整 65 页论文必须得到 130 页双语 PDF 才可合并交付，不会截断或把原文冒充译文。
   翻译超时会终止整个子进程组，保留分段及脱敏诊断日志 `translated/segments/*/*/pdf2zh.log`。
 - 单篇下载、翻译或笔记验收失败：保留审读和缓存并换下一篇；该篇按 30 分钟起的指数冷却等待恢复，避免一篇反复阻塞整天。

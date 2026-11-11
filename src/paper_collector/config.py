@@ -86,7 +86,7 @@ class AppConfig:
     max_search_rounds: int = 6
     translation_chunk_pages: int = 5
     translation_chunk_timeout_seconds: int = 600
-    translation_attempt_timeout_seconds: int = 900
+    translation_attempt_timeout_seconds: int = 1800
     run_timeout_seconds: int = 10800
 
     @property
@@ -255,7 +255,7 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("agent.max_search_rounds 必须在 1 到 20 之间")
     translation_chunk_pages = int(translation.get("chunk_pages", 5))
     translation_chunk_timeout = int(translation.get("chunk_timeout_seconds", 600))
-    translation_attempt_timeout = int(translation.get("attempt_timeout_seconds", 900))
+    translation_attempt_timeout = int(translation.get("attempt_timeout_seconds", 1800))
     if (
         not 1 <= translation_chunk_pages <= 20
         or min(translation_chunk_timeout, translation_attempt_timeout) <= 0
