@@ -25,6 +25,7 @@ def test_cron_installer_schedules_one_daily_run_at_beijing_nine():
     ]
     assert '"$(date +%z)" != +0800' in script
     assert "Every day at 09:00 (Asia/Shanghai)" in script
+    assert '15,45 9-20 * * * root /bin/bash "$repo_root/deploy/run-scheduled.sh" --skip-discovery' in script
 
 
 def test_scheduled_runner_uses_project_environment_and_private_logs(tmp_path):
@@ -57,7 +58,7 @@ def test_scheduled_runner_uses_project_environment_and_private_logs(tmp_path):
     assert len(logs) == 1
     assert "TZ=Asia/Shanghai" in logs[0].read_text()
     assert "HF_HUB_OFFLINE=1" in logs[0].read_text()
-    assert f"run\n--config\n{repo_root}/config.toml\n--no-notify\n" in logs[0].read_text()
+    assert f"run\n--scheduled\n--config\n{repo_root}/config.toml\n--no-notify\n" in logs[0].read_text()
     assert logs[0].stat().st_mode & 0o777 == 0o600
 
 

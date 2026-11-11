@@ -4,13 +4,15 @@ import argparse
 import logging
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from paper_collector import __version__
 from paper_collector.config import ConfigError, load_config
 from paper_collector.doctor import run_checks
 from paper_collector.notes_server import serve_notes
-from paper_collector.pipeline import Pipeline
+from paper_collector.pipeline import Pipeline, PipelineBusyError
 from paper_collector.scheduler import install_launchd, uninstall_launchd
 
 
@@ -28,6 +30,7 @@ def _parser() -> argparse.ArgumentParser:
         ("run", "运行完整流水线"),
         ("discover", "只抓取候选并写入数据库"),
         ("status", "查看本地状态"),
+        ("check-delivery", "独立核查当天是否完整投递，未完成时告警"),
         ("doctor", "检查依赖、网络和配置"),
     ]:
         item = sub.add_parser(command, help=help_text)
@@ -36,7 +39,13 @@ def _parser() -> argparse.ArgumentParser:
             item.add_argument(
                 "--dry-run", action="store_true", help="抓取并精排，但不下载、翻译或推送"
             )
+            item.add_argument(
+                "--scheduled", action="store_true", help="定时模式：当天成功投递后不重复发送"
+            )
             item.add_argument("--no-notify", action="store_true", help="生成全部产物，但不发送微信")
+            item.add_argument(
+                "--skip-discovery", action="store_true", help="使用本地候选池重试，不重复抓取来源"
+            )
 
     notes_server = sub.add_parser("serve-notes", help="仅提供已发布阅读笔记的 HTTP 服务")
     notes_server.add_argument("--config", default="config.toml")
@@ -88,7 +97,13 @@ def main(argv: list[str] | None = None) -> None:
 
         pipeline = Pipeline(config)
         try:
-            if args.command == "discover":
+            if args.command == "check-delivery":
+                if pipeline.check_daily_delivery():
+                    print("已核查：今日论文已完整投递。")
+                else:
+                    print("今日投递尚未完成，已尝试发送告警。")
+                    raise SystemExit(1)
+            elif args.command == "discover":
                 papers = pipeline.discover()
                 print(f"发现并更新 {len(papers)} 篇候选；数据库：{pipeline.db.path}")
             elif args.command == "status":
@@ -99,15 +114,30 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print(f"数据库：{pipeline.db.path}")
             elif args.command == "run":
-                selected = pipeline.run(dry_run=args.dry_run, no_notify=args.no_notify)
+                selected = pipeline.run(
+                    dry_run=args.dry_run,
+                    no_notify=args.no_notify,
+                    skip_discovery=args.skip_discovery,
+                    scheduled=args.scheduled,
+                )
                 if selected:
                     print(f"本次处理：{selected}")
+                elif args.scheduled and pipeline.db.delivered_on(
+                    datetime.now(ZoneInfo("Asia/Shanghai")).date()
+                ):
+                    print("今日论文已投递，未重复发送。")
                 else:
-                    print("本次没有达到推荐门槛的论文。")
+                    print("本次没有达到推荐门槛且产物准备完整的论文。")
             elif args.command == "write-note":
                 print(f"阅读笔记：{pipeline.write_reading_note(args.paper_id)}")
         finally:
             pipeline.close()
+    except PipelineBusyError as exc:
+        if getattr(args, "scheduled", False):
+            print("已有任务在运行，本次定时恢复检查跳过。")
+            return
+        print(f"错误：{exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
     except (ConfigError, RuntimeError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         raise SystemExit(2) from exc

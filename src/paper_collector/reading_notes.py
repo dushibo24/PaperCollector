@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from paper_collector.codex_agent import AgentError, CodexAgent
+from paper_collector.codex_agent import AgentError, AgentUnavailableError, CodexAgent
 from paper_collector.config import AppConfig
 from paper_collector.models import Paper, Review
 from paper_collector.note_publishing import publish_remote_note
@@ -741,6 +741,8 @@ class ReadingNotes:
                     "plan": draft["plan"],
                     "note": note,
                 }
+            except AgentUnavailableError:
+                raise
             except (OSError, ValueError, TypeError, KeyError, ReadingNoteError, AgentError):
                 continue
         return None
@@ -834,6 +836,8 @@ class ReadingNotes:
                         "note": note,
                     }
                     break
+                except AgentUnavailableError:
+                    raise
                 except (ReadingNoteError, AgentError) as exc:
                     feedback = str(exc)
             if cache is None:

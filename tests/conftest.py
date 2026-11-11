@@ -24,6 +24,7 @@ per_interest_limit = 5
 [agent]
 shortlist_size = 3
 max_deep_reviews = 2
+max_search_rounds = 1
 
 [translation]
 enabled = false

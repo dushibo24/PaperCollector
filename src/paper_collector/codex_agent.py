@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,13 @@ from paper_collector.models import Paper, Review
 
 class AgentError(RuntimeError):
     pass
+
+
+class AgentUnavailableError(AgentError):
+    """Temporary provider failure after bounded retries; changing papers won't fix it."""
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class CodexAgent:
@@ -51,26 +61,66 @@ class CodexAgent:
             command.extend(["--image", str(image.resolve())])
         command.append("-")
         timeout = timeout_seconds or self.config.codex_timeout_seconds
-        try:
-            completed = subprocess.run(
-                command,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
+        deadline = time.monotonic() + timeout
+        delays = (30, 90, 180)
+        transient_markers = (
+            "high demand",
+            "overloaded",
+            "temporarily unavailable",
+            "server_error",
+            "rate_limit_exceeded",
+            "rate limit reached",
+            "too many requests",
+            "connection reset",
+            "stream disconnected",
+            "502 bad gateway",
+            "status code 502",
+            "status code 503",
+            "status code 504",
+        )
+        for attempt in range(len(delays) + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AgentUnavailableError(f"Codex 超时（总预算 {timeout}s）")
+            # Never accept a previous attempt's output as the current result.
+            output.unlink(missing_ok=True)
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=remaining,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise AgentError(f"找不到 Codex CLI：{self.config.codex_bin}") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise AgentUnavailableError(f"Codex 超时（总预算 {timeout}s）") from exc
+            if completed.returncode == 0:
+                try:
+                    return json.loads(output.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise AgentError(f"Codex 没有生成合法 JSON：{output}") from exc
+            raw = completed.stderr or completed.stdout or ""
+            error_lines = [
+                line for line in raw.splitlines() if line.startswith(("ERROR:", "Error:"))
+            ]
+            detail = ("\n".join(error_lines) or raw)[-1600:]
+            message = f"Codex 执行失败（exit={completed.returncode}）：\n{detail}"
+            if not any(marker in detail.casefold() for marker in transient_markers):
+                raise AgentError(message)
+            if attempt == len(delays) or deadline - time.monotonic() <= delays[attempt]:
+                raise AgentUnavailableError(message)
+            delay = delays[attempt]
+            LOGGER.warning(
+                "模型服务暂时不可用，%s 秒后重试（%s/%s），保留当前论文进度",
+                delay,
+                attempt + 1,
+                len(delays),
             )
-        except FileNotFoundError as exc:
-            raise AgentError(f"找不到 Codex CLI：{self.config.codex_bin}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise AgentError(f"Codex 超时（{timeout}s）") from exc
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout)[-4000:]
-            raise AgentError(f"Codex 执行失败（exit={completed.returncode}）：\n{detail}")
-        try:
-            return json.loads(output.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise AgentError(f"Codex 没有生成合法 JSON：{output}") from exc
+            time.sleep(delay)
+        raise AgentUnavailableError("Codex 暂时不可用")
 
     def _interests_json(self) -> str:
         payload = [
@@ -94,6 +144,7 @@ class CodexAgent:
             value["abstract"] = paper.abstract[:3500]
             candidate_payload.append(value)
         prompt = template.format(
+            today=datetime.now(UTC).date().isoformat(),
             shortlist_size=self.config.shortlist_size,
             interests_json=self._interests_json(),
             candidates_json=json.dumps(candidate_payload, ensure_ascii=False, indent=2),

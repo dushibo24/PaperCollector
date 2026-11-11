@@ -205,3 +205,69 @@ def test_generated_package_is_resumed_before_other_queue_items(tmp_path):
         assert row["id"] == first.id
     finally:
         db.close()
+
+
+def test_eligible_pool_can_be_read_without_discovery_order_truncation(tmp_path):
+    db = StateDB(tmp_path / "pool.sqlite3")
+    try:
+        for index in range(205):
+            paper = make_paper(f"paper-{index}")
+            paper.doi = None
+            paper.title = f"Distinct paper {index}"
+            db.upsert_paper(paper)
+        assert len(db.eligible_papers()) == 200
+        assert len(db.eligible_papers(limit=None)) == 205
+    finally:
+        db.close()
+
+
+def test_delivery_cooldown_is_persistent_and_does_not_reject_paper(tmp_path):
+    path = tmp_path / "state.sqlite3"
+    db = StateDB(path)
+    paper = make_paper()
+    db.upsert_paper(paper)
+    db.save_review(paper.id, make_review(paper.id))
+    db.save_artifacts(paper.id, dual_pdf=tmp_path / "dual.pdf")
+    db.defer_delivery(paper.id, "translation timeout")
+    assert db.inflight_delivery() is None
+    assert db.queued_deliveries() == []
+    db.close()
+    db = StateDB(path)
+    try:
+        row = db.work_row(paper.id)
+        assert row["review_json"] and row["rejected_reason"] is None
+        assert row["delivery_failures"] == 1
+        assert row["dual_pdf"].endswith("dual.pdf")
+        db.connection.execute("UPDATE works SET delivery_retry_after='2000-01-01T00:00:00+00:00'")
+        db.connection.commit()
+        assert db.inflight_delivery()["id"] == paper.id
+    finally:
+        db.close()
+
+
+def test_daily_delivery_guard_uses_beijing_midnight_not_utc(tmp_path):
+    from datetime import date
+
+    db = StateDB(tmp_path / "day.sqlite3")
+    paper = make_paper()
+    db.upsert_paper(paper)
+    try:
+        db.connection.execute("UPDATE works SET file_delivered_at='2026-11-10T16:05:00+00:00'")
+        db.connection.commit()
+        assert db.delivered_on(date(2026, 11, 11))
+        assert not db.delivered_on(date(2026, 11, 10))
+        assert not db.delivered_on(date(2026, 11, 12))
+    finally:
+        db.close()
+
+
+def test_failed_download_is_not_immediately_selected_again(tmp_path):
+    db = StateDB(tmp_path / "failed-download.sqlite3")
+    paper = make_paper()
+    db.upsert_paper(paper)
+    try:
+        db.defer_delivery(paper.id, "PDF source returned HTTP 403")
+        assert not db.eligible_papers(limit=None)
+        assert db.work_row(paper.id)["rejected_reason"] is None
+    finally:
+        db.close()

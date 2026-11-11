@@ -83,6 +83,10 @@ class AppConfig:
     reading_notes_publish_ssh_port: int | None = None
     reading_notes_publish_timeout_seconds: int = 180
     translation_skip_subset_fonts: bool = False
+    max_search_rounds: int = 6
+    translation_chunk_pages: int = 5
+    translation_chunk_timeout_seconds: int = 600
+    translation_attempt_timeout_seconds: int = 900
 
     @property
     def reading_notes_dir(self) -> Path:
@@ -226,12 +230,8 @@ def load_config(path: str | Path) -> AppConfig:
         )
     official_lookback_years = int(sources.get("official_lookback_years", 2))
     official_per_source_limit = int(sources.get("official_per_source_limit", 20))
-    openreview_username = _expand_env(
-        sources.get("openreview_username", "${OPENREVIEW_USERNAME}")
-    )
-    openreview_password = _expand_env(
-        sources.get("openreview_password", "${OPENREVIEW_PASSWORD}")
-    )
+    openreview_username = _expand_env(sources.get("openreview_username", "${OPENREVIEW_USERNAME}"))
+    openreview_password = _expand_env(sources.get("openreview_password", "${OPENREVIEW_PASSWORD}"))
     openreview_access_token = _expand_env(
         sources.get("openreview_access_token", "${OPENREVIEW_ACCESS_TOKEN}")
     )
@@ -249,6 +249,17 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("agent.diversity_history_days 不能小于 0")
     if diversity_penalty < 0:
         raise ConfigError("agent.diversity_penalty 不能小于 0")
+    max_search_rounds = int(agent.get("max_search_rounds", 6))
+    if not 1 <= max_search_rounds <= 20:
+        raise ConfigError("agent.max_search_rounds 必须在 1 到 20 之间")
+    translation_chunk_pages = int(translation.get("chunk_pages", 5))
+    translation_chunk_timeout = int(translation.get("chunk_timeout_seconds", 600))
+    translation_attempt_timeout = int(translation.get("attempt_timeout_seconds", 900))
+    if (
+        not 1 <= translation_chunk_pages <= 20
+        or min(translation_chunk_timeout, translation_attempt_timeout) <= 0
+    ):
+        raise ConfigError("翻译分段页数必须在 1–20 之间，分段及单次处理超时必须为正数")
     codex_model = agent.get("model") or None
     translation_service_raw = str(translation.get("service", "openailiked"))
     translation_service = (
@@ -286,14 +297,18 @@ def load_config(path: str | Path) -> AppConfig:
     ):
         raise ConfigError("reading_notes.public_base_url 必须是无账号、查询参数的 HTTP(S) 地址")
     if notes_enabled and not notes_base_url:
-        raise ConfigError("启用阅读笔记需要配置 reading_notes.public_base_url / READING_NOTES_BASE_URL")
+        raise ConfigError(
+            "启用阅读笔记需要配置 reading_notes.public_base_url / READING_NOTES_BASE_URL"
+        )
     notes_port = int(reading_notes.get("port", 8765))
     notes_timeout = int(reading_notes.get("timeout_seconds", 1800))
     notes_min_chars = int(reading_notes.get("min_chars", 1000))
     if not 1 <= notes_port <= 65535:
         raise ConfigError("reading_notes.port 必须在 1 到 65535 之间")
     if notes_timeout <= 0 or not 1000 <= notes_min_chars <= 80000:
-        raise ConfigError("阅读笔记 timeout_seconds 必须为正数，min_chars 必须在 1000 到 80000 之间")
+        raise ConfigError(
+            "阅读笔记 timeout_seconds 必须为正数，min_chars 必须在 1000 到 80000 之间"
+        )
     notes_ssh_host = str(reading_notes.get("publish_ssh_host", ""))
     notes_ssh_directory = str(reading_notes.get("publish_ssh_directory", ""))
     notes_ssh_port = reading_notes.get("publish_ssh_port")
@@ -335,11 +350,15 @@ def load_config(path: str | Path) -> AppConfig:
         min_recommendation_score=float(quality.get("min_recommendation_score", 7.0)),
         top_venues={str(v).casefold() for v in quality.get("top_venues", [])},
         strong_venues={str(v).casefold() for v in quality.get("strong_venues", [])},
+        max_search_rounds=max_search_rounds,
         codex_bin=str(agent.get("codex_bin", "codex")),
         codex_model=codex_model,
         codex_timeout_seconds=int(agent.get("timeout_seconds", 900)),
         pdf2zh_bin=str(translation.get("pdf2zh_bin", "pdf2zh")),
         translation_enabled=bool(translation.get("enabled", True)),
+        translation_chunk_pages=translation_chunk_pages,
+        translation_chunk_timeout_seconds=translation_chunk_timeout,
+        translation_attempt_timeout_seconds=translation_attempt_timeout,
         translation_skip_subset_fonts=bool(translation.get("skip_subset_fonts", False)),
         translation_service=translation_service,
         translation_openailiked_base_url=openailiked_base_url or None,

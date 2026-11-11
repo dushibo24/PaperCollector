@@ -552,3 +552,21 @@ def test_legacy_cache_gets_only_a_guide_and_keeps_original_url_and_details(notes
     assert updated == legacy_note
     notes.ensure(paper, review, pdf, directory)
     assert calls == ["reading-note-guide.schema.json"]
+
+
+def test_provider_outage_preserves_paper_and_is_not_retried_as_a_bad_crop(notes_inputs):
+    from paper_collector.codex_agent import AgentUnavailableError
+
+    config, paper, review, pdf, _, _, _, _ = notes_inputs
+    calls = []
+
+    class Unavailable:
+        def _run(self, *_args, **_kwargs):
+            calls.append(1)
+            raise AgentUnavailableError("temporary provider overload")
+
+    directory = config.knowledge_base_dir / "papers" / "provider-outage"
+    with pytest.raises(AgentUnavailableError, match="temporary provider overload"):
+        ReadingNotes(config, Unavailable()).ensure(paper, review, pdf, directory)
+    assert calls == [1]
+    assert not (directory / "阅读笔记.html").exists()

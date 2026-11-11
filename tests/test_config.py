@@ -196,3 +196,19 @@ def test_baidupan_remote_dir_must_be_a_root_level_folder(config_file: Path):
 
     with pytest.raises(ConfigError, match="根目录下的单层文件夹"):
         load_config(config_file)
+
+
+@pytest.mark.parametrize("rounds", [0, -1, 21])
+def test_invalid_search_round_budget_is_rejected(config_file, rounds):
+    config_file.write_text(
+        config_file.read_text()
+        .replace("max_deep_reviews = 2", f"max_deep_reviews = 2\nmax_search_rounds = {rounds}")
+        .replace("max_search_rounds = 1\n", "")
+    )
+    with pytest.raises(ConfigError, match="max_search_rounds"):
+        load_config(config_file)
+
+
+def test_search_defaults_to_multiple_rounds(config_file):
+    config_file.write_text(config_file.read_text().replace("max_search_rounds = 1\n", ""))
+    assert load_config(config_file).max_search_rounds == 6

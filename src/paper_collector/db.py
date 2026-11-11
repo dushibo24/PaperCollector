@@ -5,8 +5,9 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from paper_collector.models import Paper, Review
 
@@ -100,6 +101,8 @@ class StateDB:
             "package_path": "TEXT",
             "reading_note_path": "TEXT",
             "reading_note_url": "TEXT",
+            "delivery_retry_after": "TEXT",
+            "delivery_failures": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, column_type in migrations.items():
             if name not in columns:
@@ -225,15 +228,16 @@ class StateDB:
             raise KeyError(paper_id)
         return Paper.from_dict(json.loads(row["paper_json"]))
 
-    def eligible_papers(self, limit: int = 200) -> list[Paper]:
+    def eligible_papers(self, limit: int | None = 200) -> list[Paper]:
         rows = self.connection.execute(
             """SELECT paper_json FROM works
                WHERE file_delivered_at IS NULL
                  AND status IN ('discovered', 'ranked', 'failed')
                  AND review_json IS NULL
                  AND rejected_reason IS NULL
+                 AND (delivery_retry_after IS NULL OR julianday(delivery_retry_after) <= julianday('now'))
                ORDER BY updated_at DESC LIMIT ?""",
-            (limit,),
+            (-1 if limit is None else limit,),
         ).fetchall()
         return [Paper.from_dict(json.loads(row["paper_json"])) for row in rows]
 
@@ -251,6 +255,8 @@ class StateDB:
             """SELECT * FROM works
                WHERE review_json IS NOT NULL AND rejected_reason IS NULL
                  AND file_delivered_at IS NULL
+                 AND (delivery_retry_after IS NULL OR julianday(delivery_retry_after) <= julianday('now')
+                      OR summary_delivered_at IS NOT NULL)
                  AND (
                      status IN ('translated', 'shared', 'delivering')
                      OR dual_pdf IS NOT NULL
@@ -266,9 +272,33 @@ class StateDB:
                WHERE review_json IS NOT NULL AND rejected_reason IS NULL
                  AND file_delivered_at IS NULL
                  AND status IN ('reviewed', 'failed')
+                 AND (delivery_retry_after IS NULL OR julianday(delivery_retry_after) <= julianday('now'))
                ORDER BY updated_at ASC LIMIT ?""",
             (limit,),
         ).fetchall()
+
+    def defer_delivery(self, paper_id: str, error: str) -> None:
+        row = self.work_row(paper_id)
+        failures = row["delivery_failures"] + 1
+        delay = min(6 * 3600, 1800 * 2 ** min(failures - 1, 4))
+        retry_after = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        self.connection.execute(
+            "UPDATE works SET status='failed',last_error=?,delivery_retry_after=?,delivery_failures=?,updated_at=? WHERE id=?",
+            (error, retry_after, failures, utc_now(), paper_id),
+        )
+        self.connection.commit()
+
+    def delivered_on(self, day: date) -> bool:
+        start = datetime.combine(day, time.min, ZoneInfo("Asia/Shanghai")).astimezone(UTC)
+        end = start + timedelta(days=1)
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM works WHERE julianday(file_delivered_at) >= julianday(?) "
+                "AND julianday(file_delivered_at) < julianday(?) LIMIT 1",
+                (start.isoformat(), end.isoformat()),
+            ).fetchone()
+            is not None
+        )
 
     def recent_deliveries(self, days: int = 7, limit: int = 50) -> list[sqlite3.Row]:
         if days <= 0:
