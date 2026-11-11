@@ -970,3 +970,35 @@ def test_later_round_searches_fresh_batch_not_the_same_ranked_out_papers(config,
         assert batches == [[f"fresh-{i}" for i in range(4)], [f"fresh-{i}" for i in range(4, 8)]]
     finally:
         pipeline.close()
+
+
+def test_ready_fresh_paper_precedes_higher_scoring_failed_long_paper_after_cooldown(
+    config, monkeypatch
+):
+    pipeline = Pipeline(config)
+    papers = [make_paper("failed-long"), make_paper("fresh-ready")]
+    for index, paper in enumerate(papers):
+        paper.doi = None
+        paper.title = f"Separate ready paper {index}"
+        pipeline.db.upsert_paper(paper)
+        review = make_review(paper.id)
+        review.overall_score = 9.5 if index == 0 else 7.5
+        pipeline.db.save_review(paper.id, review)
+    pipeline.db.defer_delivery("failed-long", "previous translation timeout")
+    pipeline.db.connection.execute(
+        "UPDATE works SET delivery_retry_after='2000-01-01' WHERE id='failed-long'"
+    )
+    pipeline.db.connection.commit()
+    attempted = []
+
+    def resume(row, **_kwargs):
+        attempted.append(row["id"])
+        return row["id"]
+
+    monkeypatch.setattr(pipeline, "_resume_pending", resume)
+    try:
+        assert pipeline.run(no_notify=True) == "fresh-ready"
+        assert attempted == ["fresh-ready"]
+        assert pipeline.db.work_row("failed-long")["review_json"]
+    finally:
+        pipeline.close()

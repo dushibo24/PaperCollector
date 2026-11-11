@@ -360,6 +360,17 @@ class Pipeline:
         )
         return signature
 
+    def _delivery_priority(self, row) -> int:
+        if row["summary_delivered_at"] or row["share_url"]:
+            return 3  # Finish an already-started notification, never switch papers.
+        if row["package_path"] and (
+            not self.config.reading_notes_enabled
+            or row["reading_note_path"]
+            and row["reading_note_url"]
+        ):
+            return 2
+        return 1 if row["delivery_failures"] == 0 else 0
+
     def _select_queued_delivery(self):
         queued = self.db.queued_deliveries()
         if not queued:
@@ -370,7 +381,7 @@ class Pipeline:
             review = Review.from_dict(json.loads(row["review_json"]))
             recent_signatures.append(self._topic_signature(paper, review))
 
-        def selection_score(row) -> tuple[float, float]:
+        def selection_score(row) -> tuple[int, float, float]:
             paper = Paper.from_dict(json.loads(row["paper_json"]))
             review = Review.from_dict(json.loads(row["review_json"]))
             signature = self._topic_signature(paper, review)
@@ -380,7 +391,11 @@ class Pipeline:
                 if union:
                     max_overlap = max(max_overlap, len(signature & recent) / len(union))
             quality = review.overall_score + review.timeliness_score * 0.05
-            return quality - self.config.diversity_penalty * max_overlap, review.overall_score
+            return (
+                self._delivery_priority(row),
+                quality - self.config.diversity_penalty * max_overlap,
+                review.overall_score,
+            )
 
         return max(queued, key=selection_score)
 
@@ -593,7 +608,17 @@ class Pipeline:
         """An individual paper's build failure must not terminate the daily run."""
         attempted = set()
         while True:
-            row = self.db.inflight_delivery() or self._select_queued_delivery()
+            inflight = self.db.inflight_delivery()
+            queued = self._select_queued_delivery()
+            row = (
+                inflight
+                if inflight is not None
+                and (
+                    queued is None
+                    or self._delivery_priority(inflight) >= self._delivery_priority(queued)
+                )
+                else queued
+            )
             if row is None or row["id"] in attempted:
                 return None
             paper_id = row["id"]
@@ -603,7 +628,7 @@ class Pipeline:
                 result = self._resume_pending(row, no_notify=no_notify)
             except (PDFError, ReadingNoteError) as exc:
                 # Never change papers after a partial notification has been sent.
-                if row["summary_delivered_at"]:
+                if row["summary_delivered_at"] or row["share_url"]:
                     raise
                 errors.append(exc)
                 self.db.defer_delivery(paper_id, str(exc))
