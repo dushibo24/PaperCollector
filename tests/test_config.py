@@ -212,3 +212,11 @@ def test_invalid_search_round_budget_is_rejected(config_file, rounds):
 def test_search_defaults_to_multiple_rounds(config_file):
     config_file.write_text(config_file.read_text().replace("max_search_rounds = 1\n", ""))
     assert load_config(config_file).max_search_rounds == 6
+
+
+def test_healthy_translation_budget_exceeds_observed_nineteen_minute_paper(config):
+    # SBVUL's successful 12-page translation took about 19 minutes. A recovery
+    # budget must not systematically abort that healthy workload at minute 15.
+    assert config.translation_attempt_timeout_seconds >= 19 * 60
+    assert config.translation_chunk_timeout_seconds < config.translation_attempt_timeout_seconds
+    assert config.translation_attempt_timeout_seconds < config.translation_timeout_seconds
