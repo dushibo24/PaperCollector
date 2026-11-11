@@ -862,3 +862,38 @@ def test_end_of_day_audit_checks_delivery_even_if_last_worker_is_still_running(c
         assert pipeline.db.stats().get("delivered", 0) == 0
     finally:
         pipeline.close()
+
+
+def test_total_run_budget_releases_lock_and_preserves_ready_paper_for_recovery(config, monkeypatch):
+    import time
+
+    from paper_collector.pipeline import RunBudgetExceeded
+
+    config.run_timeout_seconds = 0.2
+    pipeline = Pipeline(config)
+    paper = make_paper("slow-ready-paper")
+    pipeline.db.upsert_paper(paper)
+    pipeline.db.save_review(paper.id, make_review(paper.id))
+
+    def blocked(*_args, **_kwargs):
+        time.sleep(1)
+
+    monkeypatch.setattr(
+        pipeline,
+        "discover",
+        lambda *_a, **_k: pytest.fail("The whole-run deadline must interrupt before discovery"),
+    )
+    monkeypatch.setattr(pipeline, "_resume_pending", blocked)
+    try:
+        started = time.monotonic()
+        with pytest.raises(RunBudgetExceeded, match="总运行预算"):
+            pipeline.run(no_notify=True)
+        assert time.monotonic() - started < 2
+        row = pipeline.db.work_row(paper.id)
+        assert row["review_json"] and row["rejected_reason"] is None
+        assert pipeline.db.connection.execute("SELECT status FROM runs").fetchone()[0] == "failed"
+        config.run_timeout_seconds = 30
+        monkeypatch.setattr(pipeline, "_resume_pending", lambda row, **_k: row["id"])
+        assert pipeline.run(no_notify=True) == paper.id
+    finally:
+        pipeline.close()

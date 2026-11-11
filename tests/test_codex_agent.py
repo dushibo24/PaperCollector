@@ -25,7 +25,7 @@ def test_transient_provider_error_retries_current_request_without_stale_json(
         output.write_text('{"status":"ok"}')
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-    monkeypatch.setattr("paper_collector.codex_agent.subprocess.run", run)
+    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
     monkeypatch.setattr("paper_collector.codex_agent.time.sleep", sleeps.append)
     assert CodexAgent(config)._run("same paper", tmp_path / "schema.json", output) == {
         "status": "ok"
@@ -46,7 +46,7 @@ def test_provider_overload_is_bounded_and_remains_distinct_from_paper_failure(
             returncode=1, stderr="ERROR: service temporarily unavailable", stdout=""
         )
 
-    monkeypatch.setattr("paper_collector.codex_agent.subprocess.run", run)
+    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
     monkeypatch.setattr("paper_collector.codex_agent.time.sleep", sleeps.append)
     with pytest.raises(AgentUnavailableError, match="temporarily unavailable"):
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
@@ -57,7 +57,7 @@ def test_provider_overload_is_bounded_and_remains_distinct_from_paper_failure(
 def test_unsupported_model_fails_without_pointless_capacity_retries(config, tmp_path, monkeypatch):
     sleeps = []
     monkeypatch.setattr(
-        "paper_collector.codex_agent.subprocess.run",
+        "paper_collector.codex_agent.run_isolated",
         lambda *_a, **_k: SimpleNamespace(
             returncode=1, stderr="ERROR: model is not supported with a ChatGPT account", stdout=""
         ),
@@ -73,7 +73,7 @@ def test_total_request_timeout_is_classified_as_service_failure(config, tmp_path
     def timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired("codex", 900)
 
-    monkeypatch.setattr("paper_collector.codex_agent.subprocess.run", timeout)
+    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", timeout)
     with pytest.raises(AgentUnavailableError, match="总预算"):
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
 
@@ -100,7 +100,7 @@ def test_untrusted_prompt_echo_does_not_turn_an_unsupported_model_into_transient
 ):
     sleeps = []
     monkeypatch.setattr(
-        "paper_collector.codex_agent.subprocess.run",
+        "paper_collector.codex_agent.run_isolated",
         lambda *_a, **_k: SimpleNamespace(
             returncode=1,
             stderr="Paper contents: high demand temporarily unavailable\nERROR: model is not supported",

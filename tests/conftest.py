@@ -61,3 +61,20 @@ weight = 1.0
 @pytest.fixture
 def config(config_file: Path):
     return load_config(config_file)
+
+
+@pytest.fixture(autouse=True)
+def no_unmocked_external_http(monkeypatch):
+    """Regression tests must not silently fall back to live paper/model APIs."""
+    import urllib.parse
+    import urllib.request
+
+    original = urllib.request.urlopen
+
+    def local_only(url, *args, **kwargs):
+        value = url.full_url if isinstance(url, urllib.request.Request) else url
+        if urllib.parse.urlsplit(value).hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise AssertionError(f"External HTTP must be mocked in tests: {value}")
+        return original(url, *args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", local_only)

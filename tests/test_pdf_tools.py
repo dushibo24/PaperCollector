@@ -277,3 +277,21 @@ def test_full_text_limit_fails_explicitly_instead_of_silently_truncating(tmp_pat
     source = make_pdf(tmp_path / "long.pdf", 65)
     with pytest.raises(pdf_tools.PDFError, match="拒绝静默截断"):
         pdf_tools.extract_text(source, max_pages=60)
+
+
+def test_global_budget_also_terminates_translator_process_tree():
+    import os
+    import sys
+    import time
+
+    import pytest
+
+    from paper_collector.pipeline import RunBudgetExceeded, execution_budget
+
+    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']); time.sleep(60)"
+    started = time.monotonic()
+    with pytest.raises(RunBudgetExceeded), execution_budget(0.1):
+        pdf_tools._run_translation_process(
+            [sys.executable, "-c", code], timeout=2, env=os.environ.copy()
+        )
+    assert time.monotonic() - started < 5

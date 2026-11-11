@@ -10,6 +10,7 @@ from typing import Any
 
 from paper_collector.config import AppConfig
 from paper_collector.models import Paper, Review
+from paper_collector.process_tools import run_isolated
 
 
 class AgentError(RuntimeError):
@@ -85,14 +86,7 @@ class CodexAgent:
             # Never accept a previous attempt's output as the current result.
             output.unlink(missing_ok=True)
             try:
-                completed = subprocess.run(
-                    command,
-                    input=prompt,
-                    text=True,
-                    capture_output=True,
-                    timeout=remaining,
-                    check=False,
-                )
+                completed = run_isolated(command, input=prompt, timeout=remaining)
             except FileNotFoundError as exc:
                 raise AgentError(f"找不到 Codex CLI：{self.config.codex_bin}") from exc
             except subprocess.TimeoutExpired as exc:

@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import time
 import urllib.error
@@ -17,6 +16,7 @@ from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 
 from paper_collector.config import AppConfig
+from paper_collector.process_tools import run_isolated
 
 
 class PDFError(RuntimeError):
@@ -159,34 +159,7 @@ def _translate_single(pdf_path: Path, output_dir: Path, config: AppConfig) -> Pa
 
 
 def _run_translation_process(command, *, timeout, env):
-    """Timeouts terminate the whole translator tree, not only the CLI parent."""
-    with subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        start_new_session=os.name == "posix",
-    ) as process:
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except BaseException:
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            else:
-                process.kill()
-            stdout, stderr = process.communicate()
-            # Preserve timeout diagnostics without retaining a subprocess or lock.
-            import sys
-
-            error = sys.exc_info()[1]
-            if isinstance(error, subprocess.TimeoutExpired):
-                error.stdout, error.stderr = stdout, stderr
-            raise
-        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    return run_isolated(command, timeout=timeout, env=env)
 
 
 def _translation_log(directory, stdout, stderr, config):

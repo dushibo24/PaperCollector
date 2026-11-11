@@ -87,6 +87,7 @@ class AppConfig:
     translation_chunk_pages: int = 5
     translation_chunk_timeout_seconds: int = 600
     translation_attempt_timeout_seconds: int = 900
+    run_timeout_seconds: int = 10800
 
     @property
     def reading_notes_dir(self) -> Path:
@@ -260,6 +261,9 @@ def load_config(path: str | Path) -> AppConfig:
         or min(translation_chunk_timeout, translation_attempt_timeout) <= 0
     ):
         raise ConfigError("翻译分段页数必须在 1–20 之间，分段及单次处理超时必须为正数")
+    run_timeout_seconds = int(agent.get("run_timeout_seconds", 10800))
+    if not 1 <= run_timeout_seconds <= 21600:
+        raise ConfigError("agent.run_timeout_seconds 必须在 1 到 21600 秒之间")
     codex_model = agent.get("model") or None
     translation_service_raw = str(translation.get("service", "openailiked"))
     translation_service = (
@@ -351,6 +355,7 @@ def load_config(path: str | Path) -> AppConfig:
         top_venues={str(v).casefold() for v in quality.get("top_venues", [])},
         strong_venues={str(v).casefold() for v in quality.get("strong_venues", [])},
         max_search_rounds=max_search_rounds,
+        run_timeout_seconds=run_timeout_seconds,
         codex_bin=str(agent.get("codex_bin", "codex")),
         codex_model=codex_model,
         codex_timeout_seconds=int(agent.get("timeout_seconds", 900)),

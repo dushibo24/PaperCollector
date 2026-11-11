@@ -5,7 +5,10 @@ import json
 import logging
 import re
 import shutil
+import signal
 import sqlite3
+import threading
+import time
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -43,6 +46,36 @@ LOGGER = logging.getLogger("paper_collector")
 
 class PipelineBusyError(RuntimeError):
     pass
+
+
+class RunBudgetExceeded(RuntimeError):
+    pass
+
+
+@contextmanager
+def execution_budget(seconds):
+    """The CLI's whole run cannot keep the recovery lock indefinitely."""
+    if (
+        not hasattr(signal, "setitimer")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def exceeded(_signal, _frame):
+        raise RunBudgetExceeded(f"任务总运行预算 {seconds}s 已耗尽；保留缓存，等待定时恢复")
+
+    previous_handler = signal.signal(signal.SIGALRM, exceeded)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            remaining = max(0.001, previous_timer[0] - (time.monotonic() - started))
+            signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
 
 
 @contextmanager
@@ -626,7 +659,10 @@ class Pipeline:
         skip_discovery: bool = False,
         scheduled: bool = False,
     ) -> str | None:
-        with single_instance(self.config.data_dir / "paper-collector.lock"):
+        with (
+            single_instance(self.config.data_dir / "paper-collector.lock"),
+            execution_budget(self.config.run_timeout_seconds),
+        ):
             if (
                 scheduled
                 and not dry_run
