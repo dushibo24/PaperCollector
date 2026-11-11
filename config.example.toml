@@ -59,6 +59,8 @@ shortlist_size = 5
 max_deep_reviews = 3
 # 每轮候选都失败时换下一批；偶数轮扩大近期搜索，不降低审读门槛。
 max_search_rounds = 6
+# 单轮总预算 3 小时，超时释放进程锁，后续恢复从缓存续作。
+run_timeout_seconds = 10800
 # 选当天推送时参考最近 7 天，主题越重合降权越多，但不会覆盖论文质量门槛。
 diversity_history_days = 7
 diversity_penalty = 1.5
