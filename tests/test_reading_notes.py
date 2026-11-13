@@ -653,3 +653,73 @@ def test_all_note_routes_unavailable_is_not_reported_as_a_bad_paper(notes_inputs
             "reading-note-repair.md", TEXT_REPAIR_SCHEMA, workspace, [], passages_json="[]"
         )
     assert calls == ["primary", "backup"]
+
+
+def test_atomic_note_writer_repairs_valid_pairs_and_preserves_old_file_on_invalid_unicode(tmp_path):
+    from paper_collector.reading_notes import atomic_write
+
+    path = tmp_path / "note.html"
+    atomic_write(path, "𝑥 = \ud835\udc65")
+    assert path.read_text() == "𝑥 = 𝑥"
+    with pytest.raises(ReadingNoteError, match="无效 Unicode"):
+        atomic_write(path, "broken \ud835")
+    assert path.read_text() == "𝑥 = 𝑥"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_invalid_unicode_cache_is_rejected_and_rebuilt_not_reused_forever(notes_inputs):
+    config, paper, review, pdf, _, _, plan, note = notes_inputs
+    directory = config.knowledge_base_dir / "papers" / "invalid-unicode-cache"
+    cache = directory / "reading-note/validated.json"
+    cache.parent.mkdir(parents=True)
+    broken = copy.deepcopy(note)
+    broken["brief"]["text"] = "broken \ud835"
+    cache.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+                "public_filename": "a" * 32 + ".html",
+                "plan": plan,
+                "note": broken,
+            },
+            ensure_ascii=True,
+        )
+    )
+    calls = []
+
+    class Rebuild:
+        def _run(self, _prompt, schema, _output, **_kwargs):
+            calls.append(schema.name)
+            return copy.deepcopy(plan if "plan" in schema.name else note)
+
+    path, _ = ReadingNotes(config, Rebuild()).ensure(paper, review, pdf, directory)
+    assert path.is_file()
+    assert calls == ["reading-note-plan.schema.json", "reading-note.schema.json"]
+    json.loads(cache.read_text())["note"]["brief"]["text"].encode("utf-8")
+
+
+def test_invalid_unicode_plan_is_a_typed_validation_failure(notes_inputs):
+    _, _, _, _, _, inventory, plan, _ = notes_inputs
+    plan["coverage_notes"] = "bad \ud835"
+    with pytest.raises(ReadingNoteError, match="图表规划含无效 Unicode"):
+        validate_plan(plan, inventory)
+
+
+def test_invalid_unicode_from_all_models_is_data_failure_not_provider_outage(notes_inputs):
+    from paper_collector.codex_agent import AgentDataError, AgentUnavailableError
+    from paper_collector.reading_note_schema import TEXT_REPAIR_SCHEMA
+
+    config, _, _, _, workspace, *_ = notes_inputs
+    config.reading_notes_model = "primary"
+    config.reading_notes_fallback_models = ["backup"]
+
+    class InvalidData:
+        def _run(self, *_args, **_kwargs):
+            raise AgentDataError("invalid Unicode result")
+
+    with pytest.raises(AgentDataError) as error:
+        ReadingNotes(config, InvalidData())._ask(
+            "reading-note-repair.md", TEXT_REPAIR_SCHEMA, workspace, [], passages_json="[]"
+        )
+    assert not isinstance(error.value, AgentUnavailableError)

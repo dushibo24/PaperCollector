@@ -295,3 +295,73 @@ def test_global_budget_also_terminates_translator_process_tree():
             [sys.executable, "-c", code], timeout=2, env=os.environ.copy()
         )
     assert time.monotonic() - started < 5
+
+
+def test_pdf_extraction_repairs_surrogate_pairs_without_using_another_parser(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    text = "Mathematical variable \ud835\udc65 is distinct from plain x. " * 40
+    monkeypatch.setattr(
+        pdf_tools,
+        "PdfReader",
+        lambda _p: SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: text)]),
+    )
+    result = pdf_tools.extract_text(tmp_path / "source.pdf")
+    assert "𝑥" in result and "\ud835" not in result
+    result.encode("utf-8")
+
+
+def test_pdf_extraction_tries_independent_parser_for_invalid_math_glyph(monkeypatch, tmp_path):
+    import pytest
+
+    pymupdf = pytest.importorskip("pymupdf")
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        pdf_tools,
+        "PdfReader",
+        lambda _p: SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: "Weighted \ud835")]),
+    )
+
+    class Document:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __getitem__(self, _page):
+            return SimpleNamespace(get_text=lambda: "Recovered mathematical 𝑥. " * 80)
+
+    monkeypatch.setattr(pymupdf, "open", lambda _p: Document())
+    assert "𝑥" in pdf_tools.extract_text(tmp_path / "source.pdf")
+
+
+def test_unrecoverable_pdf_math_is_a_typed_paper_failure_not_utf8_crash(monkeypatch, tmp_path):
+    import pytest
+
+    pymupdf = pytest.importorskip("pymupdf")
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        pdf_tools,
+        "PdfReader",
+        lambda _p: SimpleNamespace(
+            pages=[SimpleNamespace(extract_text=lambda: "Mask vector \ud835")]
+        ),
+    )
+
+    class Document:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __getitem__(self, _page):
+            return SimpleNamespace(get_text=lambda: "Mask vector �")
+
+    monkeypatch.setattr(pymupdf, "open", lambda _p: Document())
+    with pytest.raises(pdf_tools.PDFError, match="需要图像复核") as error:
+        pdf_tools.extract_text(tmp_path / "source.pdf")
+    str(error.value).encode("utf-8")

@@ -1002,3 +1002,86 @@ def test_ready_fresh_paper_precedes_higher_scoring_failed_long_paper_after_coold
         assert pipeline.db.work_row("failed-long")["review_json"]
     finally:
         pipeline.close()
+
+
+def test_unicode_pdf_crash_is_isolated_and_next_paper_is_prepared(config, monkeypatch):
+    pipeline = Pipeline(config)
+    papers = [make_paper("bad-unicode"), make_paper("good-unicode")]
+    for index, paper in enumerate(papers):
+        paper.doi = None
+        paper.title = f"Unique unicode paper {index}"
+        paper.pdf_url = f"https://example.test/{index}.pdf"
+        pipeline.db.upsert_paper(paper)
+    reviewed = []
+    monkeypatch.setattr(pipeline, "_prepare_candidates", lambda: papers)
+    monkeypatch.setattr(
+        pipeline.agent,
+        "rank",
+        lambda *_a: [{"paper_id": p.id, "rank": i} for i, p in enumerate(papers, 1)],
+    )
+
+    def download(_url, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF-placeholder")
+        return target
+
+    monkeypatch.setattr("paper_collector.pipeline.download_pdf", download)
+    monkeypatch.setattr(
+        "paper_collector.pipeline.extract_text",
+        lambda path: (
+            "Weighted \ud835"
+            if "bad-unicode" in str(path)
+            else "Valid mathematical \ud835\udc65 " * 80
+        ),
+    )
+
+    def review(paper, text, *_args):
+        reviewed.append(paper.id)
+        assert "𝑥" in text
+        return make_review(paper.id)
+
+    monkeypatch.setattr(pipeline.agent, "review", review)
+    try:
+        assert pipeline.run(skip_discovery=True, no_notify=True) == "good-unicode"
+        assert reviewed == ["good-unicode"]
+        bad = pipeline.db.work_row("bad-unicode")
+        assert bad["review_json"] is None and bad["delivery_retry_after"]
+        assert bad["rejected_reason"] is None
+        run = pipeline.db.connection.execute("SELECT * FROM runs").fetchone()
+        assert run["selected_work_id"] == "good-unicode" and run["status"] == "prepared"
+        assert "𝑥" in (pipeline._artifact_dir(papers[1]) / "extracted.txt").read_text()
+    finally:
+        pipeline.close()
+
+
+def test_search_model_failure_does_not_overwrite_a_deferred_papers_real_error(config, monkeypatch):
+    from paper_collector.codex_agent import AgentUnavailableError
+
+    pipeline = Pipeline(config)
+    old, candidate = make_paper("deferred-original"), make_paper("new-candidate")
+    for index, paper in enumerate((old, candidate)):
+        paper.doi = None
+        paper.title = f"Unique attribution paper {index}"
+        pipeline.db.upsert_paper(paper)
+    pipeline.db.save_review(old.id, make_review(old.id))
+    monkeypatch.setattr(
+        pipeline,
+        "_resume_pending",
+        lambda *_a, **_k: (_ for _ in ()).throw(PDFError("original translation failure")),
+    )
+    monkeypatch.setattr(pipeline, "_prepare_candidates", lambda: [candidate])
+    monkeypatch.setattr(
+        pipeline.agent,
+        "rank",
+        lambda *_a: (_ for _ in ()).throw(AgentUnavailableError("ranking service busy")),
+    )
+    try:
+        with pytest.raises(AgentUnavailableError):
+            pipeline.run(skip_discovery=True, no_notify=True)
+        assert pipeline.db.work_row(old.id)["last_error"] == "original translation failure"
+        assert (
+            pipeline.db.connection.execute("SELECT selected_work_id FROM runs").fetchone()[0]
+            is None
+        )
+    finally:
+        pipeline.close()
