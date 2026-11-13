@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from paper_collector.codex_agent import AgentError, AgentUnavailableError, CodexAgent
+from paper_collector.codex_agent import (
+    AgentDataError,
+    AgentError,
+    AgentUnavailableError,
+    CodexAgent,
+)
 from paper_collector.config import AppConfig
 from paper_collector.models import Paper, Review
 from paper_collector.note_publishing import publish_remote_note
@@ -26,6 +31,7 @@ from paper_collector.reading_note_schema import (
     SECTION_IDS,
     TEXT_REPAIR_SCHEMA,
 )
+from paper_collector.unicode_tools import utf8_text, utf8_value
 
 CAPTION = re.compile(r"^\s*(Figure|Fig\.?|Table)\s*([0-9]+[A-Za-z]?|[IVXLC]+)\b", re.IGNORECASE)
 BANNED = ("而是", "而非", "而不是", "并非")
@@ -73,11 +79,17 @@ def parse_record_json(value: str) -> dict[str, Any]:
             raise ReadingNoteError(f"数据记录无法通过单括号纠正：{repair_error}") from repair_error
     if not isinstance(parsed, dict) or not parsed:
         raise ReadingNoteError("data-record 必须是非空 JSON 对象")
-    return parsed
+    try:
+        return utf8_value(parsed)
+    except UnicodeError as exc:
+        raise ReadingNoteError(f"数据记录含无效 Unicode：{exc}") from exc
 
 
 def normalize_data_record(note: dict[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(note)
+    try:
+        result = utf8_value(copy.deepcopy(note))
+    except UnicodeError as exc:
+        raise ReadingNoteError(f"笔记含无效 Unicode：{exc}") from exc
     try:
         record = result["data_record"]
         record["json"] = json.dumps(parse_record_json(record["json"]), ensure_ascii=False)
@@ -174,6 +186,10 @@ def apply_text_repairs(note: dict[str, Any], edits: list[dict[str, str]]) -> dic
 
 
 def atomic_write(path: Path, content: str) -> None:
+    try:
+        content = utf8_text(content)
+    except UnicodeError as exc:
+        raise ReadingNoteError(f"笔记文本含无效 Unicode：{exc}") from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     try:
@@ -256,6 +272,10 @@ def pdf_inventory(pdf: Path, workspace: Path) -> tuple[dict[str, Any], list[Path
 
 
 def validate_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> None:
+    try:
+        plan = utf8_value(plan)
+    except UnicodeError as exc:
+        raise ReadingNoteError(f"图表规划含无效 Unicode：{exc}") from exc
     try:
         planned = set()
         for artifact in plan["artifacts"]:
@@ -682,6 +702,7 @@ class ReadingNotes:
             )
         )
         routed = bool(self.config.reading_notes_model or self.config.reading_notes_fallback_models)
+        route_errors = []
         for index, model in enumerate(models):
             try:
                 options = {"model_override": model} if routed and model else {}
@@ -694,9 +715,12 @@ class ReadingNotes:
                     **options,
                 )
             except AgentError as exc:
+                route_errors.append(exc)
                 if index == len(models) - 1:
                     if len(models) == 1:
                         raise
+                    if all(isinstance(error, AgentDataError) for error in route_errors):
+                        raise AgentDataError("笔记模型返回的数据未通过 Unicode/JSON 校验") from exc
                     raise AgentUnavailableError(
                         "已配置的笔记模型均未完成请求，保留缓存等待恢复"
                     ) from exc

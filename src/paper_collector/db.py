@@ -148,7 +148,7 @@ class StateDB:
         )
         self.connection.commit()
 
-    def select_run_paper(self, run_id: int, paper_id: str) -> None:
+    def select_run_paper(self, run_id: int, paper_id: str | None) -> None:
         self.connection.execute(
             "UPDATE runs SET selected_work_id=? WHERE id=? AND status='running'", (paper_id, run_id)
         )

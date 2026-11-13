@@ -11,10 +11,15 @@ from typing import Any
 from paper_collector.config import AppConfig
 from paper_collector.models import Paper, Review
 from paper_collector.process_tools import run_isolated
+from paper_collector.unicode_tools import utf8_text, utf8_value
 
 
 class AgentError(RuntimeError):
     pass
+
+
+class AgentDataError(AgentError):
+    """Invalid input/output data; changing papers can resolve it."""
 
 
 class AgentUnavailableError(AgentError):
@@ -38,6 +43,10 @@ class CodexAgent:
         timeout_seconds: int | None = None,
         model_override: str | None = None,
     ) -> dict[str, Any]:
+        try:
+            prompt = utf8_text(prompt)
+        except UnicodeError as exc:
+            raise AgentDataError(f"模型输入包含无效 Unicode：{exc}") from exc
         output.parent.mkdir(parents=True, exist_ok=True)
         command = [
             self.config.codex_bin,
@@ -91,13 +100,15 @@ class CodexAgent:
                 completed = run_isolated(command, input=prompt, timeout=remaining)
             except FileNotFoundError as exc:
                 raise AgentError(f"找不到 Codex CLI：{self.config.codex_bin}") from exc
+            except UnicodeError as exc:
+                raise AgentDataError("Codex 输出不是有效的 UTF-8 文本") from exc
             except subprocess.TimeoutExpired as exc:
                 raise AgentUnavailableError(f"Codex 超时（总预算 {timeout}s）") from exc
             if completed.returncode == 0:
                 try:
-                    return json.loads(output.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise AgentError(f"Codex 没有生成合法 JSON：{output}") from exc
+                    return utf8_value(json.loads(output.read_text(encoding="utf-8")))
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    raise AgentDataError(f"Codex 没有生成合法 JSON：{output}") from exc
             raw = completed.stderr or completed.stdout or ""
             error_lines = [
                 line for line in raw.splitlines() if line.startswith(("ERROR:", "Error:"))
@@ -136,22 +147,32 @@ class CodexAgent:
         template = (self.config.repo_root / "prompts/rank.md").read_text(encoding="utf-8")
         candidate_payload = []
         for paper in papers:
-            value = paper.to_dict()
-            value["abstract"] = paper.abstract[:3500]
+            try:
+                value = utf8_value(paper.to_dict())
+            except UnicodeError as exc:
+                LOGGER.warning("跳过文本编码无效的精排候选 %r：%s", paper.id, exc)
+                continue
+            value["abstract"] = value["abstract"][:3500]
             candidate_payload.append(value)
+        if not candidate_payload:
+            return []
         prompt = template.format(
             today=datetime.now(UTC).date().isoformat(),
             shortlist_size=self.config.shortlist_size,
             interests_json=self._interests_json(),
             candidates_json=json.dumps(candidate_payload, ensure_ascii=False, indent=2),
         )
-        (run_dir / "rank.prompt.txt").write_text(prompt, encoding="utf-8")
+        try:
+            prompt = utf8_text(prompt)
+            (run_dir / "rank.prompt.txt").write_text(prompt, encoding="utf-8")
+        except UnicodeError as exc:
+            raise AgentDataError(f"精排输入文本编码无效：{exc}") from exc
         result = self._run(
             prompt,
             self.config.repo_root / "schemas/rank.schema.json",
             run_dir / "rank.result.json",
         )
-        known = {paper.id for paper in papers}
+        known = {value["id"] for value in candidate_payload}
         selected = [item for item in result.get("selected", []) if item.get("paper_id") in known]
         return sorted(selected, key=lambda item: item["rank"])[: self.config.shortlist_size]
 
@@ -163,14 +184,20 @@ class CodexAgent:
         run_dir: Path,
     ) -> Review:
         template = (self.config.repo_root / "prompts/review.md").read_text(encoding="utf-8")
-        prompt = template.format(
-            interests_json=self._interests_json(),
-            paper_json=json.dumps(paper.to_dict(), ensure_ascii=False, indent=2),
-            rank_context_json=json.dumps(rank_context, ensure_ascii=False, indent=2),
-            paper_text=paper_text,
-        )
-        safe_id = paper.id.replace(":", "_").replace("/", "_")
-        (run_dir / f"review-{safe_id}.prompt.txt").write_text(prompt, encoding="utf-8")
+        try:
+            prompt = template.format(
+                interests_json=self._interests_json(),
+                paper_json=json.dumps(utf8_value(paper.to_dict()), ensure_ascii=False, indent=2),
+                rank_context_json=json.dumps(
+                    utf8_value(rank_context), ensure_ascii=False, indent=2
+                ),
+                paper_text=utf8_text(paper_text),
+            )
+            prompt = utf8_text(prompt)
+            safe_id = paper.id.replace(":", "_").replace("/", "_")
+            (run_dir / f"review-{safe_id}.prompt.txt").write_text(prompt, encoding="utf-8")
+        except UnicodeError as exc:
+            raise AgentDataError(f"审读输入文本编码无效：{exc}") from exc
         result = self._run(
             prompt,
             self.config.repo_root / "schemas/review.schema.json",

@@ -18,7 +18,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from paper_collector.codex_agent import AgentError, AgentUnavailableError, CodexAgent
+from paper_collector.codex_agent import (
+    AgentDataError,
+    AgentError,
+    AgentUnavailableError,
+    CodexAgent,
+)
 from paper_collector.config import AppConfig
 from paper_collector.db import StateDB, normalized_title
 from paper_collector.models import Paper, Review
@@ -40,6 +45,7 @@ from paper_collector.sources import (
     SemanticScholarEnricher,
     SourceError,
 )
+from paper_collector.unicode_tools import utf8_text, utf8_value
 
 LOGGER = logging.getLogger("paper_collector")
 
@@ -275,7 +281,7 @@ class Pipeline:
             for source in sources:
                 try:
                     found = source.discover(interest)
-                except SourceError as exc:
+                except (SourceError, UnicodeError) as exc:
                     LOGGER.warning(
                         "%s / %s 抓取失败：%s", source.__class__.__name__, interest.name, exc
                     )
@@ -326,10 +332,18 @@ class Pipeline:
                         merged[paper.id] = paper
                         ids_by_title[title_key] = paper.id
         papers = [score_paper(paper, self.config) for paper in merged.values()]
+        accepted = []
         for paper in papers:
-            self.db.upsert_paper(paper)
-        self.db.event("discovered", run_id=run_id, detail=f"{len(papers)} unique works")
-        return papers
+            try:
+                paper = Paper.from_dict(utf8_value(paper.to_dict()))
+                self.db.upsert_paper(paper)
+            except UnicodeError as exc:
+                self.db.event("source_record_error", run_id=run_id, detail=str(exc))
+                LOGGER.warning("跳过编码无效的来源记录 %r：%s", paper.id, exc)
+                continue
+            accepted.append(paper)
+        self.db.event("discovered", run_id=run_id, detail=f"{len(accepted)} unique works")
+        return accepted
 
     @staticmethod
     def _topic_signature(paper: Paper, review: Review) -> set[str]:
@@ -428,11 +442,16 @@ class Pipeline:
         ]
         enriched: list[Paper] = []
         for paper in selected:
-            paper = self.s2.enrich(paper)
-            if any(author.openalex_id for author in paper.authors):
-                paper = self.openalex.enrich_authors(paper)
-            paper = score_paper(paper, self.config)
-            self.db.upsert_paper(paper)
+            try:
+                paper = self.s2.enrich(paper)
+                if any(author.openalex_id for author in paper.authors):
+                    paper = self.openalex.enrich_authors(paper)
+                paper = Paper.from_dict(utf8_value(paper.to_dict()))
+                paper = score_paper(paper, self.config)
+                self.db.upsert_paper(paper)
+            except UnicodeError as exc:
+                LOGGER.warning("跳过编码无效的候选 %r：%s", paper.id, exc)
+                continue
             enriched.append(paper)
         enriched.sort(key=lambda item: item.deterministic_score, reverse=True)
         return enriched
@@ -626,7 +645,9 @@ class Pipeline:
             self.db.select_run_paper(run_id, paper_id)
             try:
                 result = self._resume_pending(row, no_notify=no_notify)
-            except (PDFError, ReadingNoteError) as exc:
+            except (PDFError, ReadingNoteError, UnicodeError) as exc:
+                if isinstance(exc, UnicodeError):
+                    exc = ReadingNoteError(f"论文缓存文本编码无效，需要重建：{exc}")
                 # Never change papers after a partial notification has been sent.
                 if row["summary_delivered_at"] or row["share_url"]:
                     raise
@@ -720,6 +741,7 @@ class Pipeline:
                     if ready:
                         return ready
 
+                self.db.select_run_paper(run_id, None)
                 if not skip_discovery:
                     self.discover(run_id)
                 stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -731,6 +753,8 @@ class Pipeline:
                 review_errors = 0
                 had_candidates = False
                 for search_round in range(1, self.config.max_search_rounds + 1):
+                    selected_id = None
+                    self.db.select_run_paper(run_id, None)
                     # A later round changes both the API search and the local batch.
                     if not skip_discovery and search_round > 1 and search_round % 2 == 0:
                         self.discover(run_id, expansion=search_round // 2)
@@ -783,6 +807,7 @@ class Pipeline:
                             continue
                         attempted.add(paper.id)
                         selected_id = paper.id
+                        self.db.select_run_paper(run_id, paper.id)
                         self.db.set_status(paper.id, "ranked")
                         if not paper.pdf_url:
                             self.db.reject(paper.id, "没有公开 PDF，无法全文审读")
@@ -791,15 +816,20 @@ class Pipeline:
                         try:
                             original = download_pdf(paper.pdf_url, artifact_dir / "original.pdf")
                             self.db.save_artifacts(paper.id, original_pdf=original)
-                            text = extract_text(original)
+                            text = utf8_text(extract_text(original))
                             (artifact_dir / "extracted.txt").write_text(text, encoding="utf-8")
                             deep_review_attempts += 1
                             review = self.agent.review(paper, text, rank_context, round_dir)
+                            review = Review.from_dict(utf8_value(_review_dict(review)))
+                            self.db.save_review(paper.id, review)
+                            self._cache_review_summary(paper, review)
                         except AgentUnavailableError:
                             raise
-                        except (PDFError, AgentError) as exc:
+                        except (PDFError, AgentError, UnicodeError) as exc:
+                            if isinstance(exc, UnicodeError):
+                                exc = PDFError(f"PDF/审读文本含无效 Unicode，需要图像复核：{exc}")
                             review_errors += 1
-                            if isinstance(exc, PDFError):
+                            if isinstance(exc, (PDFError, AgentDataError)):
                                 self.db.defer_delivery(paper.id, str(exc))
                             else:
                                 self.db.set_status(paper.id, "failed", str(exc))
@@ -807,8 +837,6 @@ class Pipeline:
                             LOGGER.warning("审读 %s 失败：%s", paper.title, exc)
                             continue
                         completed_reviews += 1
-                        self.db.save_review(paper.id, review)
-                        self._cache_review_summary(paper, review)
                         if (
                             not review.recommend
                             or review.overall_score < self.config.min_recommendation_score
@@ -831,10 +859,14 @@ class Pipeline:
                     if ready:
                         return ready
                 if delivery_errors:
+                    selected_id = None
+                    self.db.select_run_paper(run_id, None)
                     raise PDFError(
                         f"本轮可用论文未完成产物准备，已保留缓存并安排重试：{delivery_errors[-1]}"
                     )
                 if review_errors and not completed_reviews:
+                    selected_id = None
+                    self.db.select_run_paper(run_id, None)
                     raise RuntimeError(
                         "多轮候选均未能完成全文审读，请检查 PDF 下载或模型服务；不能视为论文未达质量门槛"
                     )

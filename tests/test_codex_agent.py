@@ -91,7 +91,9 @@ def test_ranking_prompt_contains_actual_date(config, tmp_path, monkeypatch):
         return {"selected": []}
 
     monkeypatch.setattr(agent, "_run", run)
-    assert agent.rank([], tmp_path) == []
+    from test_db import make_paper
+
+    assert agent.rank([make_paper("date-test")], tmp_path) == []
     assert datetime.now(UTC).date().isoformat() in prompts[0]
 
 
@@ -133,3 +135,58 @@ def test_note_model_override_does_not_modify_main_agent_configuration(
     assert commands[0][commands[0].index("--model") + 1] == "note-model"
     assert commands[1][commands[1].index("--model") + 1] == "main-review-model"
     assert config.codex_model == "main-review-model"
+
+
+def test_invalid_model_unicode_is_a_model_error_and_never_escapes_json_boundary(
+    config, tmp_path, monkeypatch
+):
+    output = tmp_path / "out.json"
+
+    def run(*_args, **_kwargs):
+        output.write_text('{"text":"\\ud835"}')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
+    with pytest.raises(AgentError, match="合法 JSON"):
+        CodexAgent(config)._run("prompt", tmp_path / "schema", output)
+
+
+def test_invalid_prompt_is_rejected_before_a_model_request(config, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "paper_collector.codex_agent.run_isolated",
+        lambda *_a, **_k: pytest.fail("Do not send invalid text"),
+    )
+    with pytest.raises(AgentError, match="无效 Unicode"):
+        CodexAgent(config)._run("matrix \ud835", tmp_path / "schema", tmp_path / "out.json")
+
+
+def test_rank_skips_only_invalid_candidate_and_filters_selection_to_actual_payload(
+    config, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from test_db import make_paper
+
+    config.repo_root = Path(__file__).parents[1]
+    invalid, valid = make_paper("bad"), make_paper("good")
+    invalid.abstract = "bad \ud835"
+    prompts = []
+
+    def run(prompt, *_args):
+        prompts.append(prompt)
+        return {"selected": [{"paper_id": "bad", "rank": 1}, {"paper_id": "good", "rank": 2}]}
+
+    agent = CodexAgent(config)
+    monkeypatch.setattr(agent, "_run", run)
+    assert [item["paper_id"] for item in agent.rank([invalid, valid], tmp_path)] == ["good"]
+    assert '"id": "bad"' not in prompts[0]
+    prompts[0].encode("utf-8")
+
+
+def test_non_utf8_subprocess_output_is_a_typed_agent_error(config, tmp_path, monkeypatch):
+    def invalid_output(*_args, **_kwargs):
+        b"\xff".decode("utf-8")
+
+    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", invalid_output)
+    with pytest.raises(AgentError, match="有效的 UTF-8"):
+        CodexAgent(config)._run("prompt", tmp_path / "schema", tmp_path / "out.json")

@@ -17,6 +17,7 @@ from pypdf import PdfReader, PdfWriter
 
 from paper_collector.config import AppConfig
 from paper_collector.process_tools import run_isolated
+from paper_collector.unicode_tools import InvalidUnicodeText, utf8_text
 
 
 class PDFError(RuntimeError):
@@ -65,21 +66,46 @@ def download_pdf(
     return target
 
 
+def _extract_page_text(reader, pdf_path: Path, page_number: int) -> str:
+    original_error = None
+    try:
+        text = utf8_text(reader.pages[page_number - 1].extract_text() or "")
+        if "\ufffd" not in text:
+            return text
+        original_error = InvalidUnicodeText("提取结果包含缺失字形 U+FFFD")
+    except Exception as exc:  # noqa: BLE001 - fallback parser or typed PDFError, never silent loss.
+        original_error = exc
+    # A different parser can recover legitimate glyphs in some malformed CMaps.
+    # A replacement glyph is NOT proof of successful recovery.
+    try:
+        import pymupdf
+
+        with pymupdf.open(pdf_path) as document:
+            recovered = utf8_text(document[page_number - 1].get_text())
+        if not recovered.strip() or "\ufffd" in recovered:
+            raise InvalidUnicodeText("备用提取器仍有缺失字形，不能当作完整原文")
+        LOGGER.warning("PDF p.%s 的文本映射异常，已用备用解析器恢复", page_number)
+        return recovered
+    except Exception as exc:
+        raise PDFError(
+            f"PDF p.{page_number} 的文本/数学字形无法无损提取，需要图像复核；"
+            f"不会删除符号或用替代字符冒充原文（{type(original_error).__name__}）"
+        ) from exc
+
+
 def extract_text(pdf_path: Path, max_pages: int = 120, max_chars: int = 350_000) -> str:
     try:
         reader = PdfReader(str(pdf_path))
     except Exception as exc:
         raise PDFError(f"无法解析 PDF {pdf_path}: {exc}") from exc
     if len(reader.pages) > max_pages:
-        raise PDFError(f"完整 PDF 有 {len(reader.pages)} 页，超过全文审读上限 {max_pages} 页，拒绝静默截断")
+        raise PDFError(
+            f"完整 PDF 有 {len(reader.pages)} 页，超过全文审读上限 {max_pages} 页，拒绝静默截断"
+        )
     sections: list[str] = []
     total = 0
-    for page_number, page in enumerate(reader.pages[:max_pages], start=1):
-        try:
-            text = page.extract_text() or ""
-        # Individual malformed pages should not make an otherwise readable paper fail.
-        except Exception:  # noqa: BLE001
-            text = ""
+    for page_number in range(1, len(reader.pages) + 1):
+        text = _extract_page_text(reader, pdf_path, page_number)
         section = f"\n\n===== PAGE {page_number} / [p.{page_number}] =====\n{text.strip()}"
         if total + len(section) > max_chars:
             raise PDFError(f"完整论文文本超过 {max_chars} 字符，拒绝静默截断")
