@@ -18,11 +18,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from paper_collector.codex_agent import (
+from paper_collector.agent_common import (
     AgentDataError,
     AgentError,
     AgentUnavailableError,
-    CodexAgent,
+    BaseAgent,
+    make_agent,
 )
 from paper_collector.config import AppConfig
 from paper_collector.db import StateDB, normalized_title
@@ -239,7 +240,7 @@ class Pipeline:
                 "semantic_scholar", SemanticScholarEnricher.default_daily_request_limit
             ),
         )
-        self.agent = CodexAgent(config)
+        self.agent: BaseAgent = make_agent(config)
 
     def close(self) -> None:
         self.db.close()

@@ -41,9 +41,13 @@ class AppConfig:
     min_recommendation_score: float
     top_venues: set[str]
     strong_venues: set[str]
+    agent_provider: str
+    agent_model: str | None
+    agent_timeout_seconds: int
     codex_bin: str
-    codex_model: str | None
-    codex_timeout_seconds: int
+    claude_bin: str
+    claude_base_url: str | None
+    claude_auth_token: str | None
     pdf2zh_bin: str
     translation_enabled: bool
     translation_service: str
@@ -266,7 +270,29 @@ def load_config(path: str | Path) -> AppConfig:
     run_timeout_seconds = int(agent.get("run_timeout_seconds", 10800))
     if not 1 <= run_timeout_seconds <= 21600:
         raise ConfigError("agent.run_timeout_seconds 必须在 1 到 21600 秒之间")
-    codex_model = agent.get("model") or None
+    agent_provider = str(agent.get("provider", "claude")).strip().casefold()
+    if agent_provider not in {"codex", "claude"}:
+        raise ConfigError('agent.provider 只能是 "claude" 或 "codex"')
+    agent_model = agent.get("model") or None
+    if agent_provider == "claude" and not agent_model:
+        agent_model = os.environ.get("ANTHROPIC_MODEL") or None
+    agent_timeout_seconds = int(agent.get("timeout_seconds", 900))
+    if agent_timeout_seconds <= 0:
+        raise ConfigError("agent.timeout_seconds 必须为正数")
+    claude_base_url = _expand_env(
+        agent.get("claude_base_url", "${ANTHROPIC_BASE_URL}")
+    ) or None
+    claude_auth_token = _expand_env(
+        agent.get("claude_auth_token", "${ANTHROPIC_AUTH_TOKEN}")
+    ) or None
+    if claude_base_url:
+        parsed = urlsplit(claude_base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ConfigError("agent.claude_base_url 必须是 HTTP(S) 地址")
+    if agent_provider == "claude" and not (claude_base_url and claude_auth_token):
+        raise ConfigError(
+            "provider=claude 需要配置 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN"
+        )
     translation_service_raw = str(translation.get("service", "openailiked"))
     translation_service = (
         "openailiked"
@@ -368,9 +394,13 @@ def load_config(path: str | Path) -> AppConfig:
         strong_venues={str(v).casefold() for v in quality.get("strong_venues", [])},
         max_search_rounds=max_search_rounds,
         run_timeout_seconds=run_timeout_seconds,
+        agent_provider=agent_provider,
+        agent_model=agent_model,
+        agent_timeout_seconds=agent_timeout_seconds,
         codex_bin=str(agent.get("codex_bin", "codex")),
-        codex_model=codex_model,
-        codex_timeout_seconds=int(agent.get("timeout_seconds", 900)),
+        claude_bin=str(agent.get("claude_bin", "claude")),
+        claude_base_url=claude_base_url,
+        claude_auth_token=claude_auth_token,
         pdf2zh_bin=str(translation.get("pdf2zh_bin", "pdf2zh")),
         translation_enabled=bool(translation.get("enabled", True)),
         translation_chunk_pages=translation_chunk_pages,

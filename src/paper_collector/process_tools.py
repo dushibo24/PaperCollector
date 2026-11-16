@@ -7,14 +7,16 @@ import signal
 import subprocess
 
 
-def run_isolated(command, *, timeout, env=None, input=None):
+def run_isolated(command, *, timeout, env=None, input=None, cwd=None, encoding=None):
     with subprocess.Popen(
         command,
         stdin=subprocess.PIPE if input is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding=encoding,
         env=env,
+        cwd=cwd,
         start_new_session=os.name == "posix",
     ) as process:
         try:

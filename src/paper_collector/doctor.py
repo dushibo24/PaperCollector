@@ -47,9 +47,32 @@ def _network_check(name: str, url: str) -> Check:
         return Check(False, name, str(exc))
 
 
+def _agent_checks(config: AppConfig) -> list[Check]:
+    if config.agent_provider == "claude":
+        credentials = bool(config.claude_base_url and config.claude_auth_token)
+        return [
+            _command_check("Claude CLI", config.claude_bin, ["--version"]),
+            Check(
+                credentials,
+                "Claude 凭据",
+                "已配置 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN"
+                if credentials
+                else "缺少 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN",
+            ),
+            Check(
+                True,
+                "Claude 模型",
+                config.agent_model or "未指定（使用 CLI 默认模型）",
+            ),
+        ]
+    return [
+        _command_check("Codex CLI", config.codex_bin, ["exec", "--help"], "--output-schema")
+    ]
+
+
 def run_checks(config: AppConfig) -> list[Check]:
     checks = [
-        _command_check("Codex CLI", config.codex_bin, ["exec", "--help"], "--output-schema"),
+        *_agent_checks(config),
         _command_check("pdf2zh", config.pdf2zh_bin, ["--help"], "--lang-out"),
         _network_check("OpenAlex", "https://api.openalex.org/works?per-page=1"),
         _network_check(

@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from paper_collector.codex_agent import (
+from paper_collector.agent_common import (
     AgentDataError,
     AgentError,
     AgentUnavailableError,
-    CodexAgent,
+    BaseAgent,
 )
 from paper_collector.config import AppConfig
 from paper_collector.models import Paper, Review
@@ -677,7 +677,7 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
 
 
 class ReadingNotes:
-    def __init__(self, config: AppConfig, agent: CodexAgent):
+    def __init__(self, config: AppConfig, agent: BaseAgent):
         self.config = config
         self.agent = agent
         self._preferred_model = None
@@ -693,7 +693,7 @@ class ReadingNotes:
         schema_path = workspace / f"{stem}.schema.json"
         atomic_write(schema_path, json.dumps(schema, ensure_ascii=False))
         atomic_write(workspace / f"{stem}.prompt.txt", prompt)
-        configured = self.config.reading_notes_model or self.config.codex_model
+        configured = self.config.reading_notes_model or self.config.agent_model
         models = list(
             dict.fromkeys(
                 [self._preferred_model or configured, configured]

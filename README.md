@@ -2,7 +2,7 @@
 
 每天从计算机科学论文中找出真正值得看的文章，阅读全文后把原文和中文导读存入本地知识库；当天选择一篇与最近推送主题尽量不同的论文，用 `pdf2zh` 制作中英双语 PDF，打包成 ZIP 上传百度网盘，再由 Server酱把导读和分享链接推送到你的个人微信。
 
-它不是“关键词命中后随机发一篇”的 RSS 套壳。脚本负责可复现的数据抓取、PDF、翻译、百度网盘分享、去重和投递；Codex agent 负责候选精排与全文审读。任一步失败都会保留状态，下一次从断点继续。
+它不是“关键词命中后随机发一篇”的 RSS 套壳。脚本负责可复现的数据抓取、PDF、翻译、百度网盘分享、去重和投递；模型 agent（默认 Claude Code CLI）负责候选精排、全文审读和 HTML 阅读笔记。任一步失败都会保留状态，下一次从断点继续。
 
 ## 推荐逻辑
 
@@ -15,7 +15,7 @@
 | 作者 h-index / 过往影响 | 不确定时参考 | 普通 venue 的重要门槛 |
 | 时效性 | 强信号 | 强信号 |
 
-第一阶段用透明的分项公式压缩候选；第二阶段让 Codex 对少量候选排序；第三阶段解析多篇 PDF 全文，要求 agent 按页核查任务定义、最强基线、公平比较、消融、数值提升、失败案例与限制。所有达到深读阈值的论文都会保存原文和导读，进入知识库待推送队列；当天选择时兼顾质量、时效性和最近若干天的主题重合度。
+第一阶段用透明的分项公式压缩候选；第二阶段让 agent 对少量候选排序；第三阶段解析多篇 PDF 全文，要求 agent 按页核查任务定义、最强基线、公平比较、消融、数值提升、失败案例与限制。所有达到深读阈值的论文都会保存原文和导读，进入知识库待推送队列；当天选择时兼顾质量、时效性和最近若干天的主题重合度。
 
 ## 数据来源
 
@@ -31,7 +31,7 @@
 
 ## 快速开始
 
-需要 macOS/Linux、`uv`、已登录的 Codex CLI、`pdf2zh` 和 `BaiduPCS-Go`。本项目使用 Codex 的非交互 `exec`、JSON Schema 输出和只读 sandbox；参见 [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)。
+需要 macOS/Linux、`uv`、可用的 Claude Code CLI（`claude`）、`pdf2zh` 和 `BaiduPCS-Go`。模型调用默认走 `claude -p` 的 JSON Schema 结构化输出；也可以把 `[agent].provider` 改成 `"codex"`，回退到 Codex 的非交互 `exec`、只读 sandbox 和 `--output-schema`。
 
 ```bash
 brew install baidupcs-go       # macOS；其他系统见 BaiduPCS-Go Releases
@@ -44,10 +44,12 @@ cp .env.example .env
 
 1. 把邮箱改为真实地址（OpenAlex polite pool 要求）。
 2. 按需修改 `[[interests]]` 研究方向。小同行用 `scope = "niche"`，大同行用 `scope = "broad"`。
-3. 在 `.env` 填 `SERVERCHAN_SENDKEY`；有 Semantic Scholar、IEEE Xplore 或 Elsevier key 也可一并填写。OpenAI-compatible 翻译还需填写 `OPENAILIKED_BASE_URL`、`OPENAILIKED_API_KEY` 和 `OPENAILIKED_MODEL`。
+3. 在 `.env` 填 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`（例如 DeepSeek 的 `https://api.deepseek.com/anthropic`），可选填 `ANTHROPIC_MODEL`；再填 `SERVERCHAN_SENDKEY`；有 Semantic Scholar、IEEE Xplore 或 Elsevier key 也可一并填写。OpenAI-compatible 翻译还需填写 `OPENAILIKED_BASE_URL`、`OPENAILIKED_API_KEY` 和 `OPENAILIKED_MODEL`。
    OpenReview 的匿名 API 可能要求人机验证；如需稳定抓取 ICLR/TMLR，请填写 `OPENREVIEW_USERNAME` 和 `OPENREVIEW_PASSWORD`。启用 MFA 的账号可改填 `OPENREVIEW_ACCESS_TOKEN`，令牌优先于账号密码。
 4. 根据领域补充 `top_venues` 和 `strong_venues`。venue 名称忽略大小写。
 5. 在 `[baidupan].cookie` 填写百度网盘网页 Cookie。`doctor` 或首次上传会在 CLI 未登录时自动登录；已有有效登录状态时不会重复登录。
+
+`[agent].provider` 默认是 `"claude"`，使用 Claude Code CLI 加 Anthropic 兼容端点；设成 `"codex"` 可回退到 Codex。旧配置如果没有 Claude 凭据，加载时会明确提示缺少 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`，补到 `.env` 即可。`claude` 需在 `PATH` 中（定时脚本已包含 `~/.local/bin`）；也可以用 `[agent].claude_bin` 写绝对路径。
 
 `config.toml` 已被 Git 忽略，可以直接使用单行 TOML 字符串：
 
@@ -58,7 +60,7 @@ cookie = 'BDUSS=...; STOKEN=...; ...'
 
 Cookie 含双引号时优先使用上面的 TOML 单引号写法。也可以保留
 `cookie = "${BAIDUPAN_COOKIE}"`，把真实值放入同样被忽略的 `.env`。程序不会把 Cookie
-写入日志或 Codex prompt；但 `BaiduPCS-Go` 的登录接口只支持命令参数，因此自动登录瞬间，
+写入日志或模型 prompt；但 `BaiduPCS-Go` 的登录接口只支持命令参数，因此自动登录瞬间，
 Cookie 会短暂存在于本机进程参数中。
 
 `BaiduPCS-Go` 是第三方客户端，不是百度官方 SDK。若不愿把账号 Cookie 交给第三方程序，不应采用此方案；可改用百度开放平台应用，但其接入和分享权限申请明显更重。
@@ -72,7 +74,7 @@ uv run paper-collector run --config config.toml --no-notify
 uv run paper-collector run --config config.toml
 ```
 
-- `--dry-run`：抓候选并调用 Codex 精排，不下载、翻译或推送。
+- `--dry-run`：抓候选并调用模型精排，不下载、翻译或推送。
 - `--no-notify`：完成全文审读与翻译，把产物留在 `data/papers/`，不发微信。
 - 正常运行：若上次已有待投递产物，优先续传，不会另选一篇。
 
@@ -116,12 +118,12 @@ uv run paper-collector schedule install --config config.toml --hour 9 --minute 0
 uv run paper-collector schedule uninstall
 ```
 
-电脑在设定时间休眠时，普通 `StartCalendarInterval` 任务通常会在唤醒后运行；电脑必须能访问网络，且 Codex、BaiduPCS-Go 登录、翻译服务与 Server酱 SendKey 均有效。
+电脑在设定时间休眠时，普通 `StartCalendarInterval` 任务通常会在唤醒后运行；电脑必须能访问网络，且 Claude Code CLI（或 Codex）、BaiduPCS-Go 登录、翻译服务与 Server酱 SendKey 均有效。
 
 ### Linux 服务器：每天
 
-服务器需安装 `uv`、Codex CLI、`pdf2zh`、`BaiduPCS-Go` 和 `cron`，并配置好
-`config.toml`、`.env` 及 Codex 的认证。服务器时区必须为北京时间（UTC+08:00）。
+服务器需安装 `uv`、Claude Code CLI（或 Codex）、`pdf2zh`、`BaiduPCS-Go` 和 `cron`，并配置好
+`config.toml`、`.env` 及对应 CLI 的认证。服务器时区必须为北京时间（UTC+08:00）。
 建议使用已验证的依赖约束安装翻译工具，避免新版 SDK 与 `pdf2zh` 不兼容：
 
 ```bash
@@ -176,7 +178,7 @@ uv pip install --python .venv/bin/python --index-url https://pypi.tuna.tsinghua.
 
 启用后，每次推送选定的论文都会额外生成一篇完整阅读笔记，格式依据本机
 `~/.claude/skills/paper-reading-notes/SKILL.md` 实现；部署后的程序不依赖这个本地路径。
-它不是中文导读的 HTML 转存：Codex 会重新读取整篇 PDF 和页面布局，规划全部编号图表的精确裁剪，
+它不是中文导读的 HTML 转存：模型会重新读取整篇 PDF 和页面布局，规划全部编号图表的精确裁剪，
 再检查联系表及逐张原尺寸图片，写出固定八章节的详细笔记：总览、写作组织、元数据、论证主线、
 技术细节、评测协议、实验解读、来源与差异。包括带页码的证据、逐图逐表解释、
 可重建的数据/输入输出记录、证据综合表与来源核对表。写法以 Incalmo 范例提炼的
@@ -245,7 +247,7 @@ bash deploy/install-notes-service.sh
 
 ### app-server 运行，VPS 只托管 HTML
 
-所有业务始终部署并运行在 app-server：每天的任务、论文抓取、Codex 审读、翻译、
+所有业务始终部署并运行在 app-server：每天的任务、论文抓取、模型审读、翻译、
 阅读笔记生成、SQLite 与微信通知均不迁移。若 app-server 的 HTTP 可从公网访问，继续使用本机发布模式。
 若不能访问，则在 app-server 上配置 SSH 发布，把最终 HTML 上传到 `notes.example.com`。
 模式在部署时确认并配置；不会把生成任务自动迁移到 VPS。
@@ -256,7 +258,7 @@ app-server：选文 → 审读 → 翻译/HTML 笔记 → SSH 上传 HTML → �
                           VPS notes.example.com：仅提供 /notes/随机文件名.html
 ```
 
-VPS 不安装 PaperCollector、Codex、pdf2zh，也不接收 `.env`、业务配置、API key、SQLite、
+VPS 不安装 PaperCollector、Claude Code CLI/Codex、pdf2zh，也不接收 `.env`、业务配置、API key、SQLite、
 原始响应或知识库。独立的网页服务只依赖 Python 标准库；服务器已存在的其它站点不应被覆盖。
 
 先在 **app-server 上**建立到 VPS 的非交互 SSH 认证，并核验 VPS 主机指纹。不要把本地电脑的私钥
@@ -343,7 +345,7 @@ discovered → ranked → reviewed → translated → shared → delivering → 
 - Server酱确认创建推送任务后，导读与下载链接才会被原子标记为已投递。
 - 企业微信备用通道仍保留“导读成功但文件失败时只重传文件”的行为。
 - `config.toml`、`.env`、`data/` 默认不进入 Git；百度 Cookie 只用于本机调用 `BaiduPCS-Go`，不会进入论文审读 prompt。
-- Codex 只拿到兴趣配置、公开论文元数据和抽取的论文文本；密钥不会放入 prompt。其工作目录限制在当次 `data/runs/`，shell 环境不继承主进程变量，论文中的指令会被明确当作不可信文本忽略。
+- 模型只拿到兴趣配置、公开论文元数据和抽取的论文文本；密钥不会放入 prompt。Claude 子进程只继承 `PATH`、临时 `HOME`、`TMPDIR`、`LANG`/`LC_ALL` 和 `ANTHROPIC_*` 白名单变量，且只启用 `Read` 工具读取当次列出的图片；Codex 使用只读 sandbox 和 `shell_environment_policy.inherit=none`。论文和图片中的指令会被明确当作不可信文本忽略。
 - `rank.prompt.txt` 与 `review-*.prompt.txt` 会留在 `data/runs/` 便于审计。如不希望保留公开论文文本，可定期清理该目录，但不要删除 SQLite。
 
 ## 调整质量

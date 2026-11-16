@@ -625,7 +625,7 @@ def test_generation_uses_the_concrete_example_style_reference(notes_inputs):
 
 
 def test_provider_outage_preserves_paper_and_is_not_retried_as_a_bad_crop(notes_inputs):
-    from paper_collector.codex_agent import AgentUnavailableError
+    from paper_collector.agent_common import AgentUnavailableError
 
     config, paper, review, pdf, _, _, _, _ = notes_inputs
     calls = []
@@ -643,7 +643,7 @@ def test_provider_outage_preserves_paper_and_is_not_retried_as_a_bad_crop(notes_
 
 
 def test_note_model_fallback_preserves_input_and_prefers_healthy_route(notes_inputs):
-    from paper_collector.codex_agent import AgentUnavailableError
+    from paper_collector.agent_common import AgentUnavailableError
     from paper_collector.reading_note_schema import TEXT_REPAIR_SCHEMA
 
     config, _, _, _, workspace, _, _, _ = notes_inputs
@@ -669,11 +669,11 @@ def test_note_model_fallback_preserves_input_and_prefers_healthy_route(notes_inp
         "verified-backup",
     ]
     assert calls[0][1:] == calls[1][1:]
-    assert config.codex_model != "verified-backup"
+    assert config.agent_model != "verified-backup"
 
 
 def test_completed_plan_survives_provider_failure_during_writing(notes_inputs):
-    from paper_collector.codex_agent import AgentUnavailableError
+    from paper_collector.agent_common import AgentUnavailableError
 
     config, paper, review, pdf, _, _, plan, note = notes_inputs
     directory = config.knowledge_base_dir / "papers" / "cached-plan"
@@ -705,7 +705,7 @@ def test_completed_plan_survives_provider_failure_during_writing(notes_inputs):
 
 
 def test_all_note_routes_unavailable_is_not_reported_as_a_bad_paper(notes_inputs):
-    from paper_collector.codex_agent import AgentError, AgentUnavailableError
+    from paper_collector.agent_common import AgentError, AgentUnavailableError
     from paper_collector.reading_note_schema import TEXT_REPAIR_SCHEMA
 
     config, _, _, _, workspace, *_ = notes_inputs
@@ -777,7 +777,7 @@ def test_invalid_unicode_plan_is_a_typed_validation_failure(notes_inputs):
 
 
 def test_invalid_unicode_from_all_models_is_data_failure_not_provider_outage(notes_inputs):
-    from paper_collector.codex_agent import AgentDataError, AgentUnavailableError
+    from paper_collector.agent_common import AgentDataError, AgentUnavailableError
     from paper_collector.reading_note_schema import TEXT_REPAIR_SCHEMA
 
     config, _, _, _, workspace, *_ = notes_inputs

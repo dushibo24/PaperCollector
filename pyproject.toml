@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "paper-collector"
 version = "0.1.0"
-description = "A daily, evidence-aware computer-science paper scout powered by Codex"
+description = "A daily, evidence-aware computer-science paper scout powered by Claude Code or Codex"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

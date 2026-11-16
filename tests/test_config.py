@@ -228,3 +228,76 @@ def test_invalid_note_fallback_routes_are_rejected(config_file, models):
         handle.write(f"\n[reading_notes]\nfallback_models = {models}\n")
     with pytest.raises(ConfigError, match="fallback_models"):
         load_config(config_file)
+
+
+def _without_provider(config_file: Path) -> None:
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace('provider = "codex"\n', ""),
+        encoding="utf-8",
+    )
+
+
+def test_agent_defaults_to_claude_and_loads_credentials(config_file, monkeypatch):
+    _without_provider(config_file)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "deepseek-flash")
+
+    config = load_config(config_file)
+
+    assert config.agent_provider == "claude"
+    assert config.claude_base_url == "https://api.deepseek.com/anthropic"
+    assert config.claude_auth_token == "test-token"
+    assert config.agent_model == "deepseek-flash"
+
+
+def test_unknown_agent_provider_is_rejected(config_file):
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace(
+            'provider = "codex"', 'provider = "mystery"'
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="agent.provider"):
+        load_config(config_file)
+
+
+def test_claude_provider_requires_credentials(config_file, monkeypatch):
+    _without_provider(config_file)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    with pytest.raises(ConfigError, match="ANTHROPIC"):
+        load_config(config_file)
+
+
+def test_claude_base_url_must_be_http(config_file, monkeypatch):
+    _without_provider(config_file)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace(
+            "[agent]", '[agent]\nclaude_base_url = "file:///etc/passwd"'
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="HTTP"):
+        load_config(config_file)
+
+
+@pytest.mark.parametrize("seconds", [0, -5])
+def test_agent_timeout_must_be_positive(config_file, seconds):
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace(
+            "max_search_rounds = 1",
+            f"max_search_rounds = 1\ntimeout_seconds = {seconds}",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        load_config(config_file)
+
+
+def test_codex_provider_does_not_require_claude_credentials(config_file, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    assert load_config(config_file).agent_provider == "codex"

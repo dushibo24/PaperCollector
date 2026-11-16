@@ -22,6 +22,7 @@ evergreen_years = 5
 per_interest_limit = 5
 
 [agent]
+provider = "codex"
 shortlist_size = 3
 max_deep_reviews = 2
 max_search_rounds = 1

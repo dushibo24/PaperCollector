@@ -552,7 +552,7 @@ def test_empty_run_reports_status_without_claiming_paper_delivery(config, monkey
 
 
 def test_failure_notice_does_not_expose_raw_errors_or_mask_original_failure(config, monkeypatch):
-    from paper_collector.codex_agent import AgentError
+    from paper_collector.agent_common import AgentError
 
     config.notify_channel = "serverchan"
     config.serverchan_sendkey = "SCTtest"
@@ -726,7 +726,7 @@ def test_expanded_search_changes_window_keywords_and_result_budget(config, monke
 
 
 def test_provider_outage_does_not_reject_or_replace_a_good_paper(config, monkeypatch):
-    from paper_collector.codex_agent import AgentUnavailableError
+    from paper_collector.agent_common import AgentUnavailableError
 
     config.max_search_rounds = 3
     pipeline = Pipeline(config)
@@ -1055,7 +1055,7 @@ def test_unicode_pdf_crash_is_isolated_and_next_paper_is_prepared(config, monkey
 
 
 def test_search_model_failure_does_not_overwrite_a_deferred_papers_real_error(config, monkeypatch):
-    from paper_collector.codex_agent import AgentUnavailableError
+    from paper_collector.agent_common import AgentUnavailableError
 
     pipeline = Pipeline(config)
     old, candidate = make_paper("deferred-original"), make_paper("new-candidate")
@@ -1085,3 +1085,27 @@ def test_search_model_failure_does_not_overwrite_a_deferred_papers_real_error(co
         )
     finally:
         pipeline.close()
+
+
+def test_pipeline_builds_the_configured_provider_agent(config):
+    from dataclasses import replace
+
+    from paper_collector.claude_agent import ClaudeAgent
+    from paper_collector.codex_agent import CodexAgent
+
+    claude = replace(
+        config,
+        agent_provider="claude",
+        claude_base_url="https://api.deepseek.com/anthropic",
+        claude_auth_token="test-token",
+    )
+    pipeline = Pipeline(claude)
+    try:
+        assert isinstance(pipeline.agent, ClaudeAgent)
+    finally:
+        pipeline.close()
+    codex = Pipeline(config)
+    try:
+        assert isinstance(codex.agent, CodexAgent)
+    finally:
+        codex.close()

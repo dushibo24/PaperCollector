@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from paper_collector.codex_agent import AgentError, AgentUnavailableError, CodexAgent
+from paper_collector.agent_common import AgentError, AgentUnavailableError
+from paper_collector.codex_agent import CodexAgent
 
 
 def test_transient_provider_error_retries_current_request_without_stale_json(
@@ -16,7 +17,7 @@ def test_transient_provider_error_retries_current_request_without_stale_json(
 
     def run(*_args, **kwargs):
         assert not output.exists()
-        assert 0 < kwargs["timeout"] <= config.codex_timeout_seconds
+        assert 0 < kwargs["timeout"] <= config.agent_timeout_seconds
         calls.append(kwargs["input"])
         if len(calls) == 1:
             return SimpleNamespace(
@@ -25,8 +26,8 @@ def test_transient_provider_error_retries_current_request_without_stale_json(
         output.write_text('{"status":"ok"}')
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
-    monkeypatch.setattr("paper_collector.codex_agent.time.sleep", sleeps.append)
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", run)
+    monkeypatch.setattr("paper_collector.agent_common.time.sleep", sleeps.append)
     assert CodexAgent(config)._run("same paper", tmp_path / "schema.json", output) == {
         "status": "ok"
     }
@@ -46,8 +47,8 @@ def test_provider_overload_is_bounded_and_remains_distinct_from_paper_failure(
             returncode=1, stderr="ERROR: service temporarily unavailable", stdout=""
         )
 
-    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
-    monkeypatch.setattr("paper_collector.codex_agent.time.sleep", sleeps.append)
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", run)
+    monkeypatch.setattr("paper_collector.agent_common.time.sleep", sleeps.append)
     with pytest.raises(AgentUnavailableError, match="temporarily unavailable"):
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
     assert len(calls) == 4
@@ -57,12 +58,12 @@ def test_provider_overload_is_bounded_and_remains_distinct_from_paper_failure(
 def test_unsupported_model_fails_without_pointless_capacity_retries(config, tmp_path, monkeypatch):
     sleeps = []
     monkeypatch.setattr(
-        "paper_collector.codex_agent.run_isolated",
+        "paper_collector.agent_common.run_isolated",
         lambda *_a, **_k: SimpleNamespace(
             returncode=1, stderr="ERROR: model is not supported with a ChatGPT account", stdout=""
         ),
     )
-    monkeypatch.setattr("paper_collector.codex_agent.time.sleep", sleeps.append)
+    monkeypatch.setattr("paper_collector.agent_common.time.sleep", sleeps.append)
     with pytest.raises(AgentError, match="not supported") as error:
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
     assert not isinstance(error.value, AgentUnavailableError)
@@ -73,7 +74,7 @@ def test_total_request_timeout_is_classified_as_service_failure(config, tmp_path
     def timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired("codex", 900)
 
-    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", timeout)
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", timeout)
     with pytest.raises(AgentUnavailableError, match="总预算"):
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
 
@@ -102,14 +103,14 @@ def test_untrusted_prompt_echo_does_not_turn_an_unsupported_model_into_transient
 ):
     sleeps = []
     monkeypatch.setattr(
-        "paper_collector.codex_agent.run_isolated",
+        "paper_collector.agent_common.run_isolated",
         lambda *_a, **_k: SimpleNamespace(
             returncode=1,
             stderr="Paper contents: high demand temporarily unavailable\nERROR: model is not supported",
             stdout="",
         ),
     )
-    monkeypatch.setattr("paper_collector.codex_agent.time.sleep", sleeps.append)
+    monkeypatch.setattr("paper_collector.agent_common.time.sleep", sleeps.append)
     with pytest.raises(AgentError) as error:
         CodexAgent(config)._run("paper", tmp_path / "schema.json", tmp_path / "out.json")
     assert not isinstance(error.value, AgentUnavailableError)
@@ -119,7 +120,7 @@ def test_untrusted_prompt_echo_does_not_turn_an_unsupported_model_into_transient
 def test_note_model_override_does_not_modify_main_agent_configuration(
     config, tmp_path, monkeypatch
 ):
-    config.codex_model = "main-review-model"
+    config.agent_model = "main-review-model"
     commands = []
     output = tmp_path / "out.json"
 
@@ -128,13 +129,13 @@ def test_note_model_override_does_not_modify_main_agent_configuration(
         output.write_text('{"ok":true}')
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", run)
     agent = CodexAgent(config)
     agent._run("note", tmp_path / "schema", output, model_override="note-model")
     agent._run("review", tmp_path / "schema", output)
     assert commands[0][commands[0].index("--model") + 1] == "note-model"
     assert commands[1][commands[1].index("--model") + 1] == "main-review-model"
-    assert config.codex_model == "main-review-model"
+    assert config.agent_model == "main-review-model"
 
 
 def test_invalid_model_unicode_is_a_model_error_and_never_escapes_json_boundary(
@@ -146,14 +147,14 @@ def test_invalid_model_unicode_is_a_model_error_and_never_escapes_json_boundary(
         output.write_text('{"text":"\\ud835"}')
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", run)
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", run)
     with pytest.raises(AgentError, match="合法 JSON"):
         CodexAgent(config)._run("prompt", tmp_path / "schema", output)
 
 
 def test_invalid_prompt_is_rejected_before_a_model_request(config, tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "paper_collector.codex_agent.run_isolated",
+        "paper_collector.agent_common.run_isolated",
         lambda *_a, **_k: pytest.fail("Do not send invalid text"),
     )
     with pytest.raises(AgentError, match="无效 Unicode"):
@@ -187,6 +188,6 @@ def test_non_utf8_subprocess_output_is_a_typed_agent_error(config, tmp_path, mon
     def invalid_output(*_args, **_kwargs):
         b"\xff".decode("utf-8")
 
-    monkeypatch.setattr("paper_collector.codex_agent.run_isolated", invalid_output)
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", invalid_output)
     with pytest.raises(AgentError, match="有效的 UTF-8"):
         CodexAgent(config)._run("prompt", tmp_path / "schema", tmp_path / "out.json")
