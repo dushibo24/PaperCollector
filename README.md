@@ -125,8 +125,15 @@ uv run paper-collector schedule uninstall
 建议使用已验证的依赖约束安装翻译工具，避免新版 SDK 与 `pdf2zh` 不兼容：
 
 ```bash
-uv tool install --python python3 --constraint deploy/pdf2zh-constraints.txt pdf2zh==1.9.11
+bash deploy/install-pdf2zh.sh
 ```
+
+安装脚本修复 pdf2zh 1.9.11 强制使用旧版 FontTools 回退算法的问题，改用锁定的 PyMuPDF 1.25.2
+原生字体子集化；正常嵌入并压缩字体，不通过跳过子集化来绕开错误，也不手工重建字宽及字符映射。
+补丁校验调用位置及 AST，原子替换并保留 `high_level.py.papercollector-original` 备份；重复执行不再修改。
+重新安装翻译工具也需使用此脚本，未知版本或不匹配源码会拒绝修改，不盲目升级整套翻译依赖。
+修复后 `[translation].skip_subset_fonts = false`，恢复正常的字体嵌入及子集化。
+可用 `PYTHONPATH=src "$(uv tool dir)/pdf2zh/bin/python" -m paper_collector.font_repair --check` 核查。
 
 ```bash
 uv sync --locked
@@ -172,8 +179,10 @@ uv pip install --python .venv/bin/python --index-url https://pypi.tuna.tsinghua.
 它不是中文导读的 HTML 转存：Codex 会重新读取整篇 PDF 和页面布局，规划全部编号图表的精确裁剪，
 再检查联系表及逐张原尺寸图片，写出固定八章节的详细笔记：总览、写作组织、元数据、论证主线、
 技术细节、评测协议、实验解读、来源与差异。包括带页码的证据、逐图逐表解释、
-可重建的数据/输入输出记录、证据综合表与来源核对表。阅读时先呈现问题、关键想法、机制链、
-少量核心证据及其边界，再展开论证、技术和实验；写作分析、元数据、逐字段解释及完整核查表按需展开。
+可重建的数据/输入输出记录、证据综合表与来源核对表。写法以 Incalmo 范例提炼的
+`prompts/reading-note-style.md` 为参照：先用具体任务说明问题，再用完整例子走通方法，最后读实验。
+开头只有一小段导语，不再叠加摘要、阅读主线和另一份概述；术语和公式在需要它们时才引入。
+图表紧接解释它的段落，写作分析、元数据、逐字段解释及完整核查表按需展开。
 正文段落使用表达结论的小标题，不以“写得多”代替解释。默认 `min_chars = 1000` 仅防止残缺输出，
 不设目标篇幅，也不会为达到字符数追加扩写。已有配置若为 `30000`，应同步调低该旧门槛。
 
@@ -196,7 +205,7 @@ public_base_url = "http://198.51.100.25:8765"
 host = "0.0.0.0"
 port = 8765
 timeout_seconds = 1800
-min_chars = 30000
+min_chars = 1000
 ```
 
 也可把 `public_base_url` 写成 `"${READING_NOTES_BASE_URL}"`，在 `.env` 中设置真实地址。
@@ -302,7 +311,7 @@ VPS 模式不需要在 app-server 上启动 HTTP 服务，也不要在 app-serve
   数值、证据页及其余段落保持不变；仍未通过时最多自动重做一次，
   仍失败时保留流水线状态，不发送缺少阅读笔记的通知。
 - 已验收内容按 PDF SHA-256 缓存在知识库中，通知重试、重建丢失的公开 HTML 或修改访问域名
-  不会重新调用模型；缺少阅读主线的旧缓存首次升级时会单独生成主线，保留原内容和 URL。笔记会增加两阶段模型调用、token 用量和处理时间，必要时追加小型措辞修订调用；
+  不会重新调用模型，也不为旧笔记再生成一份重复提纲；保留原内容和 URL。笔记会增加两阶段模型调用、token 用量和处理时间，必要时追加小型措辞修订调用；
   配置中的 timeout 为每阶段上限。
 - 生成后的完整草稿也会绑定原 PDF 指纹保存。数据记录仅存在单个提前闭合的根括号或 Markdown 围栏时，
   可不改字段和值地纠正格式；重复键、丢失结构、额外对象或非标准数值仍拒绝发布。
@@ -356,8 +365,9 @@ discovered → ranked → reviewed → translated → shared → delivering → 
 - 仅用已有候选池补跑：`run --skip-discovery` 仍会换批审读，但不再次调用抓取源；日常任务会按需扩大搜索。
 - 相邻主题仍太像：提高 `agent.diversity_penalty` 或扩大 `agent.diversity_history_days`；若轮换过强则反向调低。
 - pdf2zh 不稳定：在 `[translation]` 切换你已配置的 service。`google` 不需 key，但网络质量不可控。
-- `pdf2zh` 在 `subset_fonts` 阶段失败：自动使用已有译文缓存，以 `--skip-subset-fonts` 重试。
-  也可设置 `[translation].skip_subset_fonts = true`，直接采用兼容模式；PDF 文件可能更大。
+- `pdf2zh` 在 `subset_fonts` 阶段报 `bad 'value'`：执行 `bash deploy/install-pdf2zh.sh` 切换到
+  MuPDF 原生子集化，设置 `[translation].skip_subset_fonts = false`，正常子集化而非跳过字体处理。
+  对其他未覆盖的子集化错误，仍保留已有译文缓存并以 `--skip-subset-fonts` 重试作为应急保护；文件可能更大。
 - 翻译分段与续作：默认每段 5 页、每段最多 600 秒、单篇每次最多 1800 秒；已完成段按原 PDF 指纹和翻译配置隔离并校验哈希与页数。
   完整 65 页论文必须得到 130 页双语 PDF 才可合并交付，不会截断或把原文冒充译文。
   翻译超时会终止整个子进程组，保留分段及脱敏诊断日志 `translated/segments/*/*/pdf2zh.log`。

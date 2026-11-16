@@ -355,11 +355,14 @@ def test_note_is_self_contained_mobile_friendly_and_escapes_untrusted_text(notes
     assert "<img src=x onerror=" not in document
     assert "&lt;script&gt;" in document
     assert "data:image/png;base64," in document
+    assert '<img loading="lazy" width="' in document
     assert document.count("<script>") == 1
     assert 'name="viewport"' in document
     assert 'id="reading-progress"' in document
     assert 'class="data-record"' in document
-    assert 'class="mechanism-chain"' in document
+    assert 'class="mechanism-chain"' not in document
+    assert 'class="paper-brief"' in document
+    assert '<span class="kind">' not in document
     assert 'class="tech-step"' in document
     assert "字段/记录为解释性重构" in document
     for identity in SECTION_IDS:
@@ -483,7 +486,6 @@ def test_reading_hierarchy_keeps_main_argument_before_supplementary_audits(notes
     positions = [
         document.index(f'id="{identity}"')
         for identity in (
-            "reading-guide",
             "story",
             "technical",
             "experiments",
@@ -492,6 +494,8 @@ def test_reading_hierarchy_keeps_main_argument_before_supplementary_audits(notes
         )
     ]
     assert positions == sorted(positions)
+    assert 'id="reading-guide"' not in document
+    assert document.index('class="paper-brief"') < positions[0]
     assert '<details id="metadata" class="appendix">' in document
     assert '<details id="writing" class="appendix">' in document
     assert '<section id="technical">' in document
@@ -517,10 +521,10 @@ def test_reading_guide_limits_the_number_of_headline_findings(notes_inputs):
         validate_note(note, plan, note["paper_id"], 1, 1)
 
 
-def test_legacy_cache_gets_only_a_guide_and_keeps_original_url_and_details(notes_inputs):
+def test_legacy_cache_is_not_expanded_into_another_summary(notes_inputs):
     config, paper, review, pdf, _, _, plan, note = notes_inputs
     directory = config.knowledge_base_dir / "papers" / "test"
-    guide = note.pop("reading_guide")
+    note.pop("reading_guide")
     legacy_note = copy.deepcopy(note)
     cache_path = directory / "reading-note" / "validated.json"
     cache_path.parent.mkdir(parents=True)
@@ -538,20 +542,86 @@ def test_legacy_cache_gets_only_a_guide_and_keeps_original_url_and_details(notes
     )
     calls = []
 
-    class GuideOnlyAgent:
+    class NoNewSummaryAgent:
         def _run(self, _prompt, schema, _output, **_kwargs):
             calls.append(schema.name)
-            assert schema.name == "reading-note-guide.schema.json"
-            return copy.deepcopy(guide)
+            raise AssertionError("完整笔记不应再生成一份重复提纲")
 
-    notes = ReadingNotes(config, GuideOnlyAgent())
+    notes = ReadingNotes(config, NoNewSummaryAgent())
     _, url = notes.ensure(paper, review, pdf, directory)
     assert url.endswith(filename)
     updated = json.loads(cache_path.read_text())["note"]
-    assert updated.pop("reading_guide") == guide
     assert updated == legacy_note
     notes.ensure(paper, review, pdf, directory)
-    assert calls == ["reading-note-guide.schema.json"]
+    assert calls == []
+
+
+def test_figures_follow_the_paragraph_that_explains_them(notes_inputs):
+    _, paper, _, pdf, workspace, _, plan, note = notes_inputs
+    section = next(item for item in note["sections"] if item["id"] == "experiments")
+    paragraph = section["paragraphs"][0]
+    paragraph["text"] = "先读这个具体比较，再看图上的差异。"
+    paragraph["figure_labels"] = ["Figure 1"]
+    following = copy.deepcopy(paragraph)
+    following["text"] = "这段在图后继续解释下一个问题。"
+    following["figure_labels"] = []
+    section["paragraphs"].append(following)
+    validate_note(note, plan, note["paper_id"], 1, 1)
+    document = render_note(note, plan, crop_artifacts(pdf, plan, workspace), paper)
+    assert document.index(paragraph["text"]) < document.index('data-label="Figure 1"')
+    assert document.index('data-label="Figure 1"') < document.index(following["text"])
+    assert document.count('data-label="Figure 1"') == 1
+
+
+@pytest.mark.parametrize("labels", ["Figure 1", [None], ["Figure 99"], ["Figure 1", "Figure 1"]])
+def test_invalid_or_repeated_inline_figure_placement_is_rejected(notes_inputs, labels):
+    *_, plan, note = notes_inputs
+    section = next(item for item in note["sections"] if item["id"] == "experiments")
+    section["paragraphs"][0]["figure_labels"] = labels
+    with pytest.raises(ReadingNoteError, match="图表"):
+        validate_note(note, plan, note["paper_id"], 1, 1)
+
+
+def test_inline_figures_cannot_move_to_an_unrelated_section(notes_inputs):
+    *_, plan, note = notes_inputs
+    note["sections"][0]["paragraphs"][0]["figure_labels"] = ["Figure 1"]
+    with pytest.raises(ReadingNoteError, match="归属"):
+        validate_note(note, plan, note["paper_id"], 1, 1)
+
+
+def test_continued_figures_keep_all_page_fragments_when_placed_inline(notes_inputs):
+    _, paper, _, pdf, workspace, _, plan, note = notes_inputs
+    crops = crop_artifacts(pdf, plan, workspace)
+    continued = copy.deepcopy(plan["artifacts"][0])
+    continued["page"] = 2
+    plan["artifacts"].append(continued)
+    explanation = copy.deepcopy(note["artifacts"][0])
+    explanation["page"] = 2
+    note["artifacts"].append(explanation)
+    section = next(item for item in note["sections"] if item["id"] == "experiments")
+    section["paragraphs"][0]["figure_labels"] = ["Figure 1"]
+    document = render_note(note, plan, crops + crops, paper)
+    assert document.count('data-label="Figure 1"') == 2
+    assert document.count('src="data:image/png;base64,') == 2
+
+
+def test_generation_uses_the_concrete_example_style_reference(notes_inputs):
+    config, paper, review, pdf, _, _, plan, note = notes_inputs
+    prompts = []
+
+    class StyleAgent:
+        def _run(self, prompt, schema, _output, **_kwargs):
+            if "plan" in schema.name:
+                return copy.deepcopy(plan)
+            prompts.append(prompt)
+            return copy.deepcopy(note)
+
+    ReadingNotes(config, StyleAgent()).ensure(
+        paper, review, pdf, config.knowledge_base_dir / "papers" / "style-reference"
+    )
+    assert len(prompts) == 1
+    assert "参照 Incalmo 笔记的讲解方式" in prompts[0]
+    assert "先完整走通一个例子" in prompts[0]
 
 
 def test_provider_outage_preserves_paper_and_is_not_retried_as_a_bad_crop(notes_inputs):

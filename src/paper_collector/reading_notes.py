@@ -9,6 +9,7 @@ import logging
 import math
 import re
 import secrets
+import struct
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,6 @@ from paper_collector.notes_http import MAX_NOTE_BYTES, PROGRESS_SCRIPT, PUBLIC_F
 from paper_collector.reading_note_schema import (
     NOTE_SCHEMA,
     PLAN_SCHEMA,
-    READING_GUIDE_SCHEMA,
     SECTION_IDS,
     TEXT_REPAIR_SCHEMA,
 )
@@ -414,6 +414,11 @@ def validate_note(
                         raise ReadingNoteError("阅读主线的小标题必须简明且表达结论")
                     for key in ("explanation",) if field == "mechanism" else ("result", "boundary"):
                         check_paragraph(item[key])
+        placed_figures = set()
+        figure_sections = {
+            normalized_label(artifact["label"]): artifact["section"]
+            for artifact in note["artifacts"]
+        }
         for section in note["sections"]:
             for paragraph in section.get("supporting_paragraphs", []):
                 check_paragraph(paragraph)
@@ -422,6 +427,18 @@ def validate_note(
                     not paragraph["heading"].strip() or len(paragraph["heading"]) > 60
                 ):
                     raise ReadingNoteError("正文小标题必须简明且表达结论")
+                labels = paragraph.get("figure_labels", [])
+                if not isinstance(labels, list) or any(
+                    not isinstance(label, str) for label in labels
+                ):
+                    raise ReadingNoteError("正文图表位置必须是标签列表")
+                for label in labels:
+                    identity = normalized_label(label)
+                    if figure_sections.get(identity) != section["id"]:
+                        raise ReadingNoteError("正文图表标签不存在或章节归属不一致")
+                    if identity in placed_figures:
+                        raise ReadingNoteError("同一图表不能在正文重复放置")
+                    placed_figures.add(identity)
         identities = []
         for artifact in note["artifacts"]:
             if type(artifact["page"]) is not int:
@@ -496,9 +513,14 @@ def paragraph_html(paragraph: dict[str, Any]) -> str:
         else ""
     )
     return (
-        f'<div class="paragraph {paragraph["kind"]}">{heading}'
-        f'<p><span class="kind">{label}</span> '
-        f"{html.escape(paragraph['text'])}</p>{source_ref(paragraph['pages'])}</div>"
+        f'<div class="paragraph {paragraph["kind"]}" data-kind="{label}">{heading}'
+        "<p>"
+        + (
+            '<span class="analysis-label">笔记分析 · </span>'
+            if paragraph["kind"] == "analysis"
+            else ""
+        )
+        + f"{html.escape(paragraph['text'])}</p>{source_ref(paragraph['pages'])}</div>"
     )
 
 
@@ -509,30 +531,6 @@ def safe_paper_url(paper: Paper) -> str:
     return ""
 
 
-def reading_guide_html(guide: dict[str, Any]) -> str:
-    body = '<section id="reading-guide" class="reading-guide"><h2>先抓住这条主线</h2>'
-    for key, title in (("problem", "要解决什么"), ("insight", "关键想法")):
-        body += f'<div class="guide-{key}"><h3>{title}</h3>{paragraph_html(guide[key])}</div>'
-    body += '<h3>方法如何走通</h3><ol class="mechanism-chain">'
-    for step in guide["mechanism"]:
-        body += (
-            f"<li><h4>{html.escape(step['title'])}</h4>{paragraph_html(step['explanation'])}</li>"
-        )
-    body += '</ol><p class="read-deeper"><a href="#technical">沿着机制继续读 ↓</a></p>'
-    body += '<h3>最值得记住的证据</h3><div class="key-findings">'
-    for finding in guide["findings"]:
-        body += (
-            f'<article class="key-finding"><h4>{html.escape(finding["title"])}</h4>'
-            + paragraph_html(finding["result"])
-            + '<div class="finding-boundary"><strong>这条证据的边界</strong>'
-            + paragraph_html(finding["boundary"])
-            + "</div></article>"
-        )
-    body += '</div><p class="read-deeper"><a href="#experiments">核对实验与原图 ↓</a></p>'
-    body += '<div class="takeaway"><h3>读完应带走什么</h3>'
-    return body + paragraph_html(guide["takeaway"]) + "</div></section>"
-
-
 def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], paper: Paper) -> str:
     figures = {}
     artifact_lookup = {
@@ -541,24 +539,22 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
     for artifact, crop in zip(plan["artifacts"], crops, strict=True):
         label = normalized_label(artifact["label"])
         explanation = artifact_lookup[(label, artifact["page"])]
-        image = base64.b64encode(crop.read_bytes()).decode("ascii")
+        image_bytes = crop.read_bytes()
+        image = base64.b64encode(image_bytes).decode("ascii")
+        width, height = struct.unpack(">II", image_bytes[16:24])
         headline = html.escape(explanation.get("headline", ""))
         body = (
             f'<figure class="artifact evidence-figure" data-label="{html.escape(label)}" '
             f'data-role="{artifact["role"]}"><h3>{html.escape(label)} · {headline or "原图与解释"}'
             f" <small>PDF p.{artifact['page']}</small></h3>"
-            f'<img loading="lazy" src="data:image/png;base64,{image}" alt="{html.escape(label)}">'
+            f'<img loading="lazy" width="{width}" height="{height}" '
+            f'src="data:image/png;base64,{image}" alt="{html.escape(label)}">'
         )
-        for field, title in (
-            ("paper_claim", "论文主张"),
-            ("interpretation", "结果与解释"),
-            ("limit", "边界与反例"),
-        ):
-            body += (
-                f'<div class="{field}"><h4>{title}</h4>{paragraph_html(explanation[field])}</div>'
-            )
+        body += paragraph_html(explanation["interpretation"])
+        body += f'<div class="limit">{paragraph_html(explanation["limit"])}</div>'
         body += (
-            '<details class="figure-details"><summary>展开推理、实验设置与原始图注</summary>'
+            '<details class="figure-details"><summary>图表读法、推理与原始题注</summary>'
+            f"<h4>图表支持的主张</h4>{paragraph_html(explanation['paper_claim'])}"
             f"<h4>笔记分析</h4>{paragraph_html(explanation['analysis'])}"
             f"<h4>设置、变量与坐标/行列</h4>{paragraph_html(explanation['axes'])}"
             '<div class="original-caption"><h4>原始图注 / 表题</h4>'
@@ -569,7 +565,8 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
                 f'<details class="supporting-figure"><summary>{html.escape(label)} · '
                 f"{headline or '补充图表与完整解读'}</summary>{body}</details>"
             )
-        figures.setdefault(explanation["section"], []).append(body)
+        section_figures = figures.setdefault(explanation["section"], {})
+        section_figures[label] = section_figures.get(label, "") + body
     record = note["data_record"]
     reconstructed = (
         " · 字段/记录为解释性重构，不代表真实观测样本" if record["reconstructed"] else ""
@@ -584,9 +581,8 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
         record_html += (
             f"<h4>{html.escape(field['name'])}</h4>{paragraph_html(field['description'])}"
         )
-    guide = note.get("reading_guide")
     sections = []
-    navigation = ['<a href="#reading-guide">先抓主线</a>'] if guide else []
+    navigation = []
     by_id = {section["id"]: section for section in note["sections"]}
     main_sections = ("story", "technical", "experiments")
     order = main_sections + (
@@ -601,18 +597,24 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
         identity = section["id"]
         title = html.escape(section["title"])
         navigation.append(f'<a href="#{identity}">{title}</a>')
-        body = "".join(paragraph_html(paragraph) for paragraph in section["paragraphs"])
+        remaining_figures = dict(figures.get(identity, {}))
+        parts = []
+        for paragraph in section["paragraphs"]:
+            rendered = paragraph_html(paragraph)
+            if identity == "technical":
+                rendered = f'<div class="tech-step">{rendered}</div>'
+            parts.append(rendered)
+            for label in paragraph.get("figure_labels", []):
+                figure = remaining_figures.pop(normalized_label(label), None)
+                if figure is not None:
+                    parts.append(figure)
+        body = "".join(parts) + "".join(remaining_figures.values())
         if identity == "technical":
-            body = "".join(
-                f'<div class="tech-step">{paragraph_html(paragraph)}</div>'
-                for paragraph in section["paragraphs"]
-            )
             body += (
                 '<details class="supporting-detail"><summary>输入输出实例与逐字段解释</summary>'
                 + record_html
                 + "</details>"
             )
-        body += "".join(figures.get(identity, []))
         if identity == "experiments":
             body += (
                 '<details class="supporting-detail"><summary>完整证据综合表（逐项核对）</summary>'
@@ -665,14 +667,7 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
         "TITLE": html.escape(note["title_zh"]),
         "SUBTITLE": html.escape(note["subtitle"]),
         "ORIGINAL_TITLE": html.escape(paper.title),
-        "BRIEF": (
-            reading_guide_html(guide)
-            + '<details class="supporting-detail legacy-brief"><summary>论文全貌（含配置与数字）</summary>'
-            + paragraph_html(note["brief"])
-            + "</details>"
-            if guide
-            else '<div class="paper-brief">' + paragraph_html(note["brief"]) + "</div>"
-        ),
+        "BRIEF": '<div class="paper-brief">' + paragraph_html(note["brief"]) + "</div>",
         "NAVIGATION": "".join(navigation),
         "SECTIONS": "".join(sections),
         "ORIGINAL_LINK": original_link,
@@ -689,6 +684,10 @@ class ReadingNotes:
 
     def _ask(self, template: str, schema: dict[str, Any], workspace: Path, images, **values):
         prompt = (self.config.repo_root / "prompts" / template).read_text(encoding="utf-8")
+        if template == "reading-note.md":
+            values["style_reference"] = (
+                self.config.repo_root / "prompts" / "reading-note-style.md"
+            ).read_text(encoding="utf-8")
         prompt = prompt.format(**values)
         stem = Path(template).stem
         schema_path = workspace / f"{stem}.schema.json"
@@ -926,26 +925,6 @@ class ReadingNotes:
                 raise ReadingNoteError(
                     f"完整阅读笔记两次生成/验收失败，保留状态等待重试：{feedback}"
                 )
-        if "reading_guide" not in cache["note"]:
-            guide = self._ask(
-                "reading-note-guide.md",
-                READING_GUIDE_SCHEMA,
-                workspace,
-                [],
-                inventory_json=json.dumps(inventory, ensure_ascii=False),
-                note_json=json.dumps(cache["note"], ensure_ascii=False),
-            )
-            updated = copy.deepcopy(cache["note"])
-            updated["reading_guide"] = guide
-            updated = self.repair_connectives(updated, workspace)
-            validate_note(
-                updated,
-                cache["plan"],
-                paper.id,
-                inventory["page_count"],
-                self.config.reading_notes_min_chars,
-            )
-            cache["note"] = updated
         atomic_write(cache_path, json.dumps(cache, ensure_ascii=False, indent=2))
         crops = crop_artifacts(pdf, cache["plan"], workspace)
         document = render_note(cache["note"], cache["plan"], crops, paper)

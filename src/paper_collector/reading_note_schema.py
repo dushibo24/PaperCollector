@@ -42,7 +42,9 @@ READING_GUIDE_SCHEMA = object_schema(
         "takeaway": PARAGRAPH,
     }
 )
-SECTION_PARAGRAPH = object_schema({**PARAGRAPH["properties"], "heading": TEXT})
+SECTION_PARAGRAPH = object_schema(
+    {**PARAGRAPH["properties"], "heading": TEXT, "figure_labels": array_schema(TEXT)}
+)
 PLAN_SCHEMA = object_schema(
     {
         "artifacts": array_schema(
@@ -71,7 +73,6 @@ NOTE_SCHEMA = object_schema(
         "title_zh": TEXT,
         "subtitle": TEXT,
         "brief": PARAGRAPH,
-        "reading_guide": READING_GUIDE_SCHEMA,
         "sections": array_schema(
             object_schema(
                 {
