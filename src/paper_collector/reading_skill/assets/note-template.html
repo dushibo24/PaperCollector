@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<!--
+  使用说明（复制后删除本注释块）
+  1. 全局替换 {{...}} 占位符；slug 用 PDF 文件名去掉 .pdf，保持空格与标点。
+  2. 六个锚点不可改名、不可删：overview / writing / metadata / story /
+     technical / evaluation-protocol / experiments / source-discrepancies。
+  3. 每个 artifact 必须有：裁切图、axes、interpretation、limit、original-caption。
+  4. 每篇至少一条 data-record，逐字段解释；重建字段要在 source-ref 里说明。
+  5. 所有数值后跟页码，例如「PDF p.7」；论文主张与笔记分析分开写。
+  6. 禁用连接词：而是 / 而非 / 而不是 / 并非。少用「不是」。
+  7. 完成后运行：
+     python3 scripts/validate_note.py papers/<slug>.html
+     python3 scripts/build_index.py --root . --check
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{直译标题}}｜研究札记</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script defer src="../assets/app.js"></script>
+</head>
+<body class="editorial-v2">
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-mark">读</span>新领域数据集 · 研究札记</a>
+  <nav class="top-actions">
+    <a class="desktop" href="../README.md">说明与来源</a>
+    <button data-print-button type="button">打印</button>
+  </nav>
+</header>
+<progress id="reading-progress" value="0" max="1" aria-label="阅读进度"></progress>
+
+<div class="paper-shell">
+<aside class="sidebar">
+  <div class="side-title">本篇导读</div>
+  <a href="#overview">一段话先读懂</a>
+  <a href="#writing">论文结构与写法</a>
+  <a href="#metadata">题目、作者与出处</a>
+  <a href="#story">故事线</a>
+  <a href="#technical">技术细节</a>
+  <a href="#evaluation-protocol">评测口径与构造</a>
+  <a href="#experiments">实验怎样回答问题</a>
+  <a href="#source-discrepancies">核验记录与边界</a>
+  <div class="side-meta">{{会议}}<br>{{规模摘要，如 25 万题 / 8 类任务}}</div>
+</aside>
+
+<main id="main" class="paper-main">
+
+<!-- ============ overview ============ -->
+<header class="paper-header" id="overview">
+  <!-- 一段话讲完：做了什么任务、造了多少数据、考了哪些模型、
+       关键数字（最好是人 vs 模型的差距）、发现的缺口、作者的改进。
+       不要写「本文提出……」这种空开头，直接给事实。 -->
+  <p class="paper-brief">{{一句话任务定义 + 数据规模 + 最强模型分数 + 人类分数 + 核心发现 + 方法带来的提升}}</p>
+  <div class="paper-titleline">
+    <p class="eyebrow">{{会议/期刊}} · {{论文类型，如 Benchmark / Dataset}}</p>
+    <!-- H1 必须是英文题目的逐字直译；解释性副标题放到 subtitle。 -->
+    <h1>{{论文标题直译}}</h1>
+    <p class="subtitle">{{副标题：一句话概括这篇论文最深的一个发现或反转}}</p>
+    <p class="original-title">{{英文原题}}</p>
+  </div>
+  <div class="source-links">
+    <!-- PDF 在 papers/ 的上一级；文件名按 URL 编码，空格写 %20。 -->
+    <a class="primary" href="{{PDF文件}}">本地 PDF</a>
+    <a href="{{官方链接}}">论文页</a>
+    <a href="{{代码/数据链接}}">数据与代码</a>
+  </div>
+</header>
+
+<!-- ============ writing ============ -->
+<section class="paper-preface" id="writing">
+  <h2>论文结构与写法</h2>
+  <!-- 先报硬信息：正文页数、附录页数、章节数、图表数。
+       再逐节说它承担什么论证任务：引言怎么起、相关工作怎么定位、
+       方法节是先定义还是先举例、实验节按什么顺序排。 -->
+  <p>{{章节分布、正文/附录页数、图表数量；每一节在论证链里负责什么}}</p>
+  <!-- story-chain 只放压缩后的论证步骤，每步一个短句，动词开头。 -->
+  <div class="story-chain">
+    <span>{{第1步 领域重要}}</span>
+    <span>{{第2步 现有基准缺什么}}</span>
+    <span>{{第3步 要证明的假设}}</span>
+    <span>{{第4步 数据怎么造}}</span>
+    <span>{{第5步 指标怎么定}}</span>
+    <span>{{第6步 现有方法暴露什么}}</span>
+    <span>{{第7步 针对性改进}}</span>
+    <span>{{第8步 证明基准有价值}}</span>
+  </div>
+  <!-- 三条具体的可复用写法：句式、图表顺序、数字摆放。
+       避免「逻辑清晰」「层层递进」这类空评价。 -->
+  <p>{{三条值得借鉴的写法安排，每条落到具体段落或图表}}</p>
+  <p>{{写法缺口：哪里缺对照、哪个数字与表格对不上、哪段靠断言带过}}</p>
+  <p class="source-ref">写法分析为本笔记归纳，论文本身没有单列「写作结构」一节；章节信息核对 PDF p.{{起止页}}。</p>
+</section>
+
+<!-- ============ metadata ============ -->
+<section class="chapter" id="metadata">
+  <div class="chapter-head"><span class="number">01</span><h2>题目、作者与出处</h2></div>
+  <dl class="facts">
+    <dt>正式题名</dt><dd>{{英文题名}}</dd>
+    <dt>发表出处</dt><dd>{{会议/期刊、卷期、页码、年份；所读版本与正式身份分开写}}</dd>
+    <dt>CCF 等级</dt><dd>{{A/B/C 及依据；找不到正式目录时写「未见正式目录，按会议等级暂记」}}</dd>
+    <dt>署名机构</dt><dd>{{机构，逐一列出}}</dd>
+    <dt>作者</dt><dd>{{作者；共同一作、通讯作者标注}}</dd>
+    <dt>数据规模</dt><dd>{{样本数、任务数、划分比例、语言}}</dd>
+    <dt>数据来源</dt><dd>{{底本数据、采集方式、标注成本、许可证}}</dd>
+    <dt>评测指标</dt><dd>{{指标全称与缩写，多个指标写清主指标}}</dd>
+    <dt>公开材料</dt><dd>{{数据、代码、排行榜链接与可用性}}</dd>
+  </dl>
+  <p class="source-ref">核对 PDF p.{{页码}}（标题页/附录）；{{哪些信息来自论文页而非 PDF}}。</p>
+</section>
+
+<!-- ============ story ============ -->
+<section class="chapter" id="story">
+  <div class="chapter-head"><span class="number">02</span><h2>故事线：{{副题}}</h2></div>
+  <div class="story-prose">
+    <!-- 五段必须首尾相接：上一段的结尾是下一段的问题。
+         每段 3–6 句，至少一个数字或具体系统名。 -->
+    <p><strong>背景与重要性。</strong>{{这个领域为什么重要；现有做法已经做到哪一步；用一个数字说明规模或影响}}</p>
+    <p><strong>相关工作的不足。</strong>{{已有 benchmark/方法具体缺什么；不要写「不够全面」，要写缺哪类样本、哪个指标测不出来}}</p>
+    <p><strong>挑战。</strong>{{要证明「这个基准有价值」，需要同时解决哪三件事：数据可信、难度有区分度、缺口可归因}}</p>
+    <p><strong>解决方式。</strong>{{作者怎么造数据、怎么定评测口径、怎么把发现转成改进方法}}</p>
+    <p><strong>贡献。</strong>{{四条贡献，每条带数字或可复算的结果；区分「论文声称」与「实验支持」}}</p>
+  </div>
+  <p>把这条链压成一句：<strong>{{一句话压缩整条论证，主语是数据/基准，不是作者}}</strong>。</p>
+</section>
+
+<!-- ============ technical ============ -->
+<section class="chapter" id="technical">
+  <div class="chapter-head"><span class="number">03</span><h2>技术细节：{{副题}}</h2></div>
+
+  <!-- 每个 tech-step 只讲一个技术动作。先用一句人话说明它在流程里的位置，
+       再给图，再对着图讲。一个动作一张主图；细节图另起一个 step。 -->
+  <section class="tech-step">
+    <h3>{{技术步骤标题，动词短语}}</h3>
+    <p>{{这一步解决什么问题、输入输出是什么、在整体管线中的位置}}</p>
+
+    <!-- 图/表块：data-label 写 Figure/Table 编号；data-role 取 method/data/result/analysis。 -->
+    <article class="artifact evidence-figure" data-label="Figure 1" data-role="method">
+      <figure>
+        <a class="chart-image cropped-image" href="../assets/crops/{{slug}}/figure-1.png" target="_blank" rel="noopener"><img src="../assets/crops/{{slug}}/figure-1.png" alt="{{图的内容，一句话}}" loading="lazy" decoding="async"></a>
+        <figcaption><strong>Figure 1</strong><span class="badge neutral">{{图的作用}}</span><a href="{{PDF文件}}#page={{页码}}">图体 p.{{页码}}</a></figcaption>
+      </figure>
+      <div class="figure-explanation">
+        <!-- axes：读图说明书。横轴、纵轴、每一列、每个颜色/符号各代表什么，
+             单位与取值范围。表格要写清行是模型还是数据集、列是设置还是指标。 -->
+        <p class="axes">{{横轴/纵轴/列/图例各是什么；单位与范围}}</p>
+        <!-- interpretation：按读图顺序讲 2–4 个关键观察，每个观察带数值。 -->
+        <p class="interpretation">{{先看什么，再看什么；关键数字与对比；这张图支撑哪一步论证}}</p>
+        <!-- limit：这张图不能证明什么。缺基线、缺方差、缺人类上限、样本太小等。 -->
+        <p class="limit">{{图本身不能说明的部分；论文是否报告方差/显著性}}</p>
+        <details class="original-caption"><summary>原始题注</summary><p>{{原文题注，保持英文原文}}</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.{{页码}}（{{节名}}）。</p>
+  </section>
+
+  <!-- 第二条数据记录（本模板示例，实际按论文内容替换） -->
+  <section class="tech-step">
+    <h3>一条完整记录</h3>
+    <!-- 优先用论文里真实印出的样例。论文没印 JSON 时，按字段重建，
+         并在下面 source-ref 里写明哪些字段是推断的。 -->
+    <p>{{这条记录取自哪张表/哪一节；它为什么能代表这类样本}}</p>
+    <pre class="data-record">{
+  "id": "{{slug}}-{{split}}-0001",
+  "task": "{{子任务名}}",
+  "input": {
+    "question": "{{原问题}}",
+    "context": "{{必要的上下文/图注/文档段}}"
+  },
+  "answer": "{{标准答案}}",
+  "answer_type": "{{答案类型，如 span / number / choice}}",
+  "annotations": {
+    "human_accuracy": null,
+    "model_accuracy": null
+  },
+  "meta": {
+    "source": "{{底本数据}}",
+    "split": "{{train/dev/test}}"
+  }
+}</pre>
+    <!-- 逐字段解释：字段名 → 含义 → 为什么这样设计 → 它支持哪条主张。
+         只解释有信息量的字段，不逐字复述 JSON。 -->
+    <p><strong>逐字段解释。</strong>{{id 如何定位样本；task 对应哪种能力；input 里哪些是原文、哪些是改写；answer 的判定规则；answer_type 影响哪个指标；annotations 的 null 表示论文未报告；meta 说明可追溯性}}</p>
+    <p class="source-ref">样例取自 PDF p.{{页码}}（{{表号/图号}}）；{{哪些字段由本笔记重建，依据是什么}}。</p>
+  </section>
+</section>
+
+<!-- ============ evaluation protocol ============ -->
+<section class="chapter" id="evaluation-protocol">
+  <div class="chapter-head"><span class="number">04</span><h2>评测口径与构造</h2></div>
+
+  <section class="tech-step">
+    <h3>{{主指标}}怎么算</h3>
+    <!-- 先给定义/公式，再给直白解释，再讲为什么这样构造能防住捷径。 -->
+    <p>{{指标定义、公式、归一化方式；哪些情况算对、哪些算错}}</p>
+    <p>{{作者为什么选这个口径；它奖励什么行为、惩罚什么行为}}</p>
+    <p class="limit">{{指标副作用：可被猜测、可被格式套利、对长度敏感、方差未报告等}}</p>
+    <p class="source-ref">原文定位：PDF p.{{页码}}（{{指标小节}}）。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>数据怎么构造</h3>
+    <!-- 写清五件事：底本从哪来、谁标注、如何质控、如何划分、如何防泄漏。 -->
+    <p>{{底本来源与筛选标准；标注者身份与培训；一致性指标（如 Cohen's κ）；去重与防泄漏；训练/测试划分}}</p>
+    <p class="limit">{{构造过程里没有交代的环节；人工校验覆盖率；成本与耗时是否报告}}</p>
+    <p class="source-ref">原文定位：PDF p.{{页码}}（{{数据构造小节}}）。</p>
+  </section>
+</section>
+
+<!-- ============ experiments ============ -->
+<section class="chapter" id="experiments">
+  <div class="chapter-head"><span class="number">05</span><h2>实验怎样回答问题</h2></div>
+
+  <!-- 每个实验：实验条件（模型、提示、训练数据、运行次数）→ 结果图表 → 解读。
+       先交代条件再看数字，避免把不同设置的分数混在一起。 -->
+  <section class="tech-step">
+    <h3>{{实验一：区分度}}</h3>
+    <p>{{模型清单、参数量、是否微调、提示格式、温度与重复次数；测试集规模}}</p>
+
+    <article class="artifact evidence-figure" data-label="Table 2" data-role="result">
+      <figure>
+        <a class="chart-image cropped-image" href="../assets/crops/{{slug}}/table-2.png" target="_blank" rel="noopener"><img src="../assets/crops/{{slug}}/table-2.png" alt="{{表的内容，一句话}}" loading="lazy" decoding="async"></a>
+        <figcaption><strong>Table 2</strong><span class="badge neutral">{{表的作用}}</span><a href="{{PDF文件}}#page={{页码}}">图体 p.{{页码}}</a></figcaption>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">{{行是什么（模型/方法）、列是什么（指标/设置）、加粗和下划线各表示什么}}</p>
+        <p class="interpretation">{{最强模型 vs 人类 vs 随机基线；分差多少；哪些行异常，为什么}}</p>
+        <p class="limit">{{是否有方差、是否单次运行、是否有未公开的提示调优、是否有污染风险}}</p>
+        <details class="original-caption"><summary>原始题注</summary><p>{{原文题注}}</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.{{页码}}（{{表号}}）。</p>
+
+    <p>{{这一段把数字翻译成结论：这个分差说明基准测到了什么，不能说明什么}}</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>{{实验二：错误分析与发现}}</h3>
+    <p>{{分析维度：按任务类型、按难度、按答案类型、按错误模式；由谁标注、样本量多少}}</p>
+    <article class="artifact evidence-figure" data-label="Figure {{n}}" data-role="analysis">
+      <figure>
+        <a class="chart-image cropped-image" href="../assets/crops/{{slug}}/figure-{{n}}.png" target="_blank" rel="noopener"><img src="../assets/crops/{{slug}}/figure-{{n}}.png" alt="{{图的内容}}" loading="lazy" decoding="async"></a>
+        <figcaption><strong>Figure {{n}}</strong><span class="badge neutral">{{图的作用}}</span><a href="{{PDF文件}}#page={{页码}}">图体 p.{{页码}}</a></figcaption>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">{{横轴/纵轴/图例；类别顺序与单位}}</p>
+        <p class="interpretation">{{主导错误类型占比；哪类样本几乎全错；与人类错误分布的差异}}</p>
+        <p class="limit">{{错误分类的互斥性、标注者一致性、样本是否随机抽取}}</p>
+        <details class="original-caption"><summary>原始题注</summary><p>{{原文题注}}</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.{{页码}}（{{节名}}）。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>{{实验三：针对性改进}}</h3>
+    <p>{{改进方法基于哪条 finding；改了什么组件；训练/推理成本变化}}</p>
+    <article class="artifact evidence-figure" data-label="Table {{n}}" data-role="result">
+      <figure>
+        <a class="chart-image cropped-image" href="../assets/crops/{{slug}}/table-{{n}}.png" target="_blank" rel="noopener"><img src="../assets/crops/{{slug}}/table-{{n}}.png" alt="{{表的内容}}" loading="lazy" decoding="async"></a>
+        <figcaption><strong>Table {{n}}</strong><span class="badge neutral">{{表的作用}}</span><a href="{{PDF文件}}#page={{页码}}">图体 p.{{页码}}</a></figcaption>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">{{行/列/设置；baseline 与改进版的对照关系}}</p>
+        <p class="interpretation">{{提升幅度；是否在所有子集上都提升；代价是什么}}</p>
+        <p class="limit">{{是否只在一个模型上验证；是否与基线同预算；是否报告多次运行}}</p>
+        <details class="original-caption"><summary>原始题注</summary><p>{{原文题注}}</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.{{页码}}（{{表号}}）。</p>
+  </section>
+
+  <!-- 收束表：一行一条主张，证据必须是上面出现过的图表编号。 -->
+  <section class="evidence-synthesis">
+    <h3>证据怎样支撑主张</h3>
+    <table>
+      <thead><tr><th>论文主张</th><th>对应证据</th><th>关键数值</th><th>边界</th></tr></thead>
+      <tbody>
+        <tr><td>{{基准有区分度}}</td><td>Table {{n}}</td><td>{{最强模型 X vs 人类 Y}}</td><td>{{模型数量/提示设置}}</td></tr>
+        <tr><td>{{现有方法在某能力上系统性失败}}</td><td>Figure {{n}}</td><td>{{错误类型占比}}</td><td>{{标注样本量}}</td></tr>
+        <tr><td>{{改进方法有效}}</td><td>Table {{n}}</td><td>{{+X 分}}</td><td>{{仅单模型/单数据集}}</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <p><strong>把实验读成一条线。</strong>{{数据质量 → 区分度 → 错误机制 → 改进 → 仍然存在的边界；不要按论文顺序复述，按论证顺序串}}</p>
+</section>
+
+<!-- ============ source discrepancies ============ -->
+<section class="chapter" id="source-discrepancies">
+  <div class="chapter-head"><span class="number">06</span><h2>核验记录与边界</h2></div>
+  <p>下面把「论文怎么说」与「表格、图、附录实际怎么显示」分开记录。凡是有出入的地方，以 PDF 的图表数值为准；凡是论文没有报告的项目，明确标成「未报告」。</p>
+  <div class="table-scroll">
+    <table class="authors">
+      <thead><tr><th>项目</th><th>论文表述</th><th>核对结果与边界</th></tr></thead>
+      <tbody>
+        <tr><td>{{样本总数}}</td><td>{{正文写的数字}}</td><td>{{表格逐项相加得到多少；差异原因}}</td></tr>
+        <tr><td>{{模型数量}}</td><td>{{正文写的模型数}}</td><td>{{表里实际多少行；是否含变体}}</td></tr>
+        <tr><td>{{某个分数}}</td><td>{{正文引用的来源}}</td><td>{{本轮是否实测；引自哪篇}}</td></tr>
+        <tr><td>{{人工上限}}</td><td>{{是否给出}}</td><td>{{未报告 / 来自旧论文 / 本笔记未复算}}</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>这份笔记的边界。</strong>{{截图均按 PDF 坐标裁切；表格数值为目测读数还是直接抄录；哪些字段由本笔记重建；哪些结论只适用于所读版本}}</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>

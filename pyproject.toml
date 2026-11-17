@@ -35,4 +35,6 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored from the paper-reading-notes skill; keep byte-for-byte upstream style.
+extend-exclude = ["src/paper_collector/reading_skill"]
 

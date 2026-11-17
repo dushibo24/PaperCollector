@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SWE-bench：语言模型能解决真实的 GitHub issue 吗？｜研究札记</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script defer src="../assets/app.js"></script>
+</head>
+<body class="editorial-v2">
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-mark">读</span>新领域数据集 · 研究札记</a>
+  <nav class="top-actions">
+    <a class="desktop" href="../README.md">说明与来源</a>
+    <button data-print-button type="button">打印</button>
+  </nav>
+</header>
+<progress id="reading-progress" value="0" max="1" aria-label="阅读进度"></progress>
+
+<div class="paper-shell">
+<aside class="sidebar">
+  <div class="side-title">本篇导读</div>
+  <a href="#overview">一段话先读懂</a>
+  <a href="#writing">论文结构与写法</a>
+  <a href="#metadata">题目、作者与出处</a>
+  <a href="#story">故事线：为什么非做不可</a>
+  <a href="#technical">从 PR 到任务怎样落地</a>
+  <a href="#experiments">实验怎样回答问题</a>
+  <a href="#evaluation-protocol">评测口径与构造</a>
+  <a href="#source-discrepancies">核验记录与边界</a>
+  <div class="side-meta">ICLR 2024<br>CCF 未收录 · 52页</div>
+</aside>
+
+<main id="main" class="paper-main">
+
+<header class="paper-header" id="overview">
+  <p class="paper-brief">SWE-bench 是普林斯顿与芝加哥大学在 ICLR 2024 发布的软件工程基准。它从 12 个热门 Python 仓库的 93,139 条 pull request 出发，先要求 PR 解决一个 issue 并修改测试文件，再在真实环境里跑测试、只保留至少有一个测试从失败转为通过的样本，最终得到 2,294 条任务。模型拿到 issue 文本与完整代码库，要生成一个能应用、且让相关测试全部通过的补丁。主结果是：在 BM25 检索设置下，最好的 Claude 2 只解出 1.96%；在「oracle」检索设置下也只有 4.80%。作者进一步用上下文长度、仓库分布、补丁长度与定性案例说明，瓶颈在代码定位、长上下文理解与跨文件修改，而不只是补丁格式。</p>
+
+  <div class="paper-titleline">
+    <p class="eyebrow">ICLR 2024 · Software Engineering Benchmark</p>
+    <h1>SWE-bench：语言模型能解决真实的 GitHub issue 吗？</h1>
+    <p class="subtitle">从 9.3 万条 PR 中筛出 2,294 个真实修复任务，用仓库自带测试判分，最好的 Claude 2 只解出 1.96%</p>
+    <p class="original-title">SWE-bench: Can Language Models Resolve Real-World GitHub Issues?</p>
+  </div>
+  <div class="source-links">
+    <a class="primary" href="../../2310.06770%20-%20SWE-bench.pdf">本地 PDF</a>
+    <a href="https://arxiv.org/abs/2310.06770">arXiv</a>
+  </div>
+</header>
+
+<section class="paper-preface" id="writing">
+  <h2>论文结构与写法</h2>
+  <p>全文按「模型能力已经超出旧基准 → 真实软件工程既难又可用测试验证 → 用三级过滤把 PR 变成任务 → 定义补丁与判分 → 在两种检索设置下测模型 → 从低分里拆出瓶颈」推进。第 1 节用「基准饱和 + 代码任务可验证」立论；第 2 节把构造管线、任务形式、指标与数据特性一次讲完；第 3 节介绍自己微调的 SWE-Llama；第 4 节交代检索与输入格式；第 5 节报告主结果、上下文消融与定性分析；第 6、7 节收束到相关工作与局限。真正的工作量在附录 A：把每个过滤阶段的保留量、字段定义、执行校验与 Lite 子集逐项写清楚。</p>
+  <div class="story-chain">
+    <span>第1节 引言：现有基准饱和；代码生成题太短；真实仓库修复既难又能跑测试验证</span>
+    <span>第2.1节 构造：12 个热门 Python 仓库 93,139 条 PR → 属性过滤 11,407 → 执行过滤 2,294</span>
+    <span>第2.2节 任务：输入 issue 文本与完整代码库，输出 patch；应用成功且测试全过才算解决</span>
+    <span>第2.3–2.4节 特性：真实、可更新、长输入、跨文件编辑；另出 300 条 Lite 子集</span>
+    <span>第3节 训练集与模型：37 个仓库 19,000 条 → 过滤后 10,000 条；LoRA 微调 CodeLlama-Python 7b/13b</span>
+    <span>第4节 设置：BM25 检索与 oracle 检索；ChatGPT-3.5、GPT-4、Claude 2、SWE-Llama</span>
+    <span>第5节 结果：Claude 2 在 BM25 下 1.96%，oracle 下 4.80%；上下文越长反而越差</span>
+    <span>第5.1节与附录F 分析：定位错误、补丁过短、只改单文件；案例逐行对照</span>
+  </div>
+  <p>写法上有四个值得借鉴的安排。第一，把「数据构造」本身当作方法：三级过滤每一级都给保留数量，读者能判断 2,294 条来自 9 万多条的逐层筛选。第二，主结果与「oracle」结果并排：前者代表真实可部署的检索，后者代表「已经知道该改哪些文件」的上界，两者的差距直接把瓶颈指向代码定位。第三，不只报一个总分，还按仓库、按输入长度、按补丁长度拆开；每个拆分都对应一条可检验的解释。第四，附上训练集与微调模型，让开源模型也能进入同一张表；这让「数据集」同时成为「训练资源」与「评测标尺」。</p>
+  <p class="source-ref">写法分析为本笔记归纳，论文本身没有单列「写作结构」一节。</p>
+</section>
+
+<section class="chapter" id="metadata">
+  <div class="chapter-head"><span class="number">01</span><h2>题目、作者与出处</h2></div>
+  <dl class="facts">
+    <dt>正式题名</dt><dd>SWE-bench: Can Language Models Resolve Real-World GitHub Issues?</dd>
+    <dt>所读版本</dt><dd>arXiv:2310.06770v3，共 52 页；PDF 首页标注 Published as a conference paper at ICLR 2024，arXiv 版本时间为 2024 年 11 月 11 日。本页页码、截图与数值只对应这份 PDF。</dd>
+    <dt>发表身份</dt><dd>ICLR 2024（International Conference on Learning Representations）。</dd>
+    <dt>CCF 等级</dt><dd>ICLR 未列入常用 CCF 推荐目录；以正式目录为准。</dd>
+    <dt>署名机构</dt><dd>Princeton University、Princeton Language and Intelligence、University of Chicago。</dd>
+    <dt>数据规模</dt><dd>12 个 Python 仓库，从 93,139 条 PR 中得到 2,294 条任务；另有 300 条 SWE-bench Lite 与 37 个仓库的 19,000 条训练样本（按 30k token 截断后有效 10,000 条）。</dd>
+    <dt>任务形态</dt><dd>输入 issue 文本与完整代码库；输出一个 patch；用仓库自带的 fail-to-pass 与 pass-to-pass 测试判定是否解决。</dd>
+    <dt>评测模型</dt><dd>ChatGPT-3.5（16,385 token）、GPT-4（32,768 token）、Claude 2（100,000 token）与作者微调的 SWE-Llama 7b/13b（≥100,000 token）。</dd>
+  </dl>
+  <div class="table-scroll">
+    <table class="authors">
+      <thead><tr><th>署名机构</th><th>作者</th></tr></thead>
+      <tbody>
+        <tr><td>Princeton University</td><td>Carlos E. Jimenez*、John Yang*、Alexander Wettig、Shunyu Yao、Ofir Press、Karthik Narasimhan</td></tr>
+        <tr><td>Princeton Language and Intelligence</td><td>Carlos E. Jimenez、John Yang、Alexander Wettig、Shunyu Yao、Ofir Press、Karthik Narasimhan</td></tr>
+        <tr><td>University of Chicago</td><td>Kexin Pei</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="source-ref">作者、单位与脚注核对 PDF p.1；星号为共同一作，通讯作者为 carlosej@princeton.edu 与 johnby@stanford.edu。全文共 7 位作者。</p>
+</section>
+
+<section class="chapter" id="story">
+  <div class="chapter-head"><span class="number">02</span><h2>故事线：为什么非做不可</h2></div>
+
+  <div class="story-prose">
+    <p><strong>背景与重要性。</strong>语言模型已经进入聊天、编程助手与自动化工作流，模型能写出的代码越来越长，但评测还停在「给小函数补全几行」的尺度。HumanEval 一类基准题目自包含、几十行就能解完，和真实软件工程差距很大：修一个 bug 往往要先在几千个文件里找到相关函数，再理解跨文件调用关系，最后改几行并保证旧功能不坏。如果评测不进入真实仓库，模型能力的上限与短板都无法被看清。</p>
+
+    <p><strong>相关工作的不足。</strong>论文把已有评测分成两类并指出缺口。通用能力基准（MMLU、BIG-bench、HELM）覆盖广，但每个任务只考一两个技能，题目偏短，难以给出「能不能完成一次真实工程任务」的判断。代码生成基准（HumanEval 及其多语言、多测试扩展）可执行、可判分，却把编辑范围限制在单个函数或闭包填空，模型不需要定位、不需要读整个仓库、不需要维护旧测试。软件工程领域已有自动修复与补丁生成研究，但数据规模、任务真实度与统一评测口径都不够。</p>
+
+    <p><strong>挑战。</strong>把 GitHub 变成基准要同时解决四件事。第一是数据质量：仓库、issue 与 PR 充满噪声，很多 PR 没有关联 issue，很多修复没有补测试，直接爬下来会把「无法验证的改动」混进数据。第二是正确性判定：代码补丁不能靠文本相似度打分，必须真的应用、真的安装依赖、真的跑测试。第三是上下文规模：一个仓库平均 3,010 个非测试文件、43.8 万行代码，远超当时多数模型的上下文窗口，必须设计检索。第四是可复现性：仓库会更新、依赖会漂移、测试会失效，任务必须绑定到确切的 base commit 与运行环境。</p>
+
+    <p><strong>解决方式。</strong>作者设计三级过滤。第一步选 12 个热门且以 Python 为主的开源仓库，抓取全部 PR；第二步只保留「已合并、关联并解决 issue、修改了测试文件」的 PR；第三步在真实环境里先装依赖，再把测试补丁与其他改动分开应用，记录每个测试在改动前后的状态，只保留至少有一个测试从失败变成通过的样本。通过三级过滤的 2,294 条 PR 被转成统一任务：代码库由 repo 与 base commit 还原，问题描述由关联 issue 的标题、正文与评论拼接，参考解与隐藏测试都存成 patch。判分时把模型补丁应用到代码库，运行 fail-to-pass 与 pass-to-pass 测试；补丁应用成功且测试全过，才算解决。</p>
+
+    <p><strong>贡献。</strong>论文的贡献可以归成四项。第一，提出一个从真实 PR 自动构造软件工程任务的管线，并给出每一级的保留量。第二，发布 2,294 条跨 12 个仓库的任务，附完整的执行评测环境与字段定义。第三，发布 19,000 条训练样本与 SWE-Llama 7b/13b，让开源模型能进入同一张表。第四，用 BM25 与 oracle 两种检索、按仓库与上下文长度的拆分、以及逐例定性分析，把「模型不会修真实 bug」拆成可操作的瓶颈。</p>
+  </div>
+
+  <p>把这条链压成一句：<strong>模型能力超出旧基准 → 真实仓库修复既难又能用测试验证 → 从 9.3 万条 PR 三级过滤出 2,294 条 → 用补丁应用与测试全过判分 → Claude 2 只解出 1.96% → 瓶颈在定位、长上下文与跨文件修改</strong>。</p>
+
+  <section class="tech-step">
+    <h3>先看任务到底长什么样</h3>
+    <p>Figure 1 把一条任务的完整闭环画出来：左边是 issue 文本与代码库快照，中间是语言模型生成补丁，右边是仓库自带测试在补丁前后的状态变化。它要说明的是，SWE-bench 考的是「读问题、找文件、改代码、过测试」这一整条链路，远超「写一段代码」。</p>
+    <article class="artifact evidence-figure" data-label="Figure 1" data-role="task">
+      <figure>
+        <figcaption><strong>Figure 1</strong><span class="badge neutral">任务形态</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=1">图体 p.1</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-1.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-1.png" alt="SWE-bench Figure 1 任务形态" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">从左到右四块：Issue（问题描述）、Codebase（仓库文件树）、Language Model（模型）、Generated PR（生成的补丁，标出 +20 −12 与文件名）、Unit Tests（Pre PR / Post PR / Tests 三列的状态表）。箭头表示「问题加代码库 → 模型 → 补丁 → 测试」。</p>
+        <p class="interpretation">左边示例是 scikit-learn 的一个数据泄漏问题，代码库列出 <code>sklearn/</code>、<code>examples/</code>、<code>setup.py</code> 等入口；模型生成的是带增删行数的补丁，不是整份文件；右边测试表用叉号与对勾表示补丁前后每个测试的状态，最后两行的 <code>matrix_transform</code>、<code>euclidean_diff</code> 在补丁前就通过，属于 pass-to-pass，用来防止回归。这张图把「可执行评测」与「真实仓库」两个卖点放在同一张图里：任务来自真实 issue，判定来自真实测试。</p>
+        <p class="limit">图中只画了一条简化的链路，没有展示检索步骤；真实输入只包含检索出的若干文件，整份代码库放不进去。补丁 +20 −12 也只是示意，实际参考解平均改 32.8 行、1.7 个文件。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 1: SWE-bench sources task instances from real-world Python repositories by connecting GitHub issues to merged pull request solutions that resolve related tests. Provided with the issue text and a codebase snapshot, models generate a patch that is evaluated against real tests.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.1。</p>
+  </section>
+</section>
+
+<section class="chapter" id="technical">
+  <div class="chapter-head"><span class="number">03</span><h2>从 PR 到任务怎样落地</h2></div>
+
+  <section class="interface-panel">
+    <h3>从输入到判定</h3>
+    <dl>
+      <dt>输入</dt><dd>一条 issue 聚合文本（标题、正文、PR 首次提交前的相关评论），加上 BM25 检索出的若干代码文件与文档，再加任务说明与一个 patch 格式示例。oracle 设置下，检索结果换成参考解实际修改过的文件。</dd>
+      <dt>输出</dt><dd>一个 unified diff 格式的补丁，声明要改哪些文件、哪些行、增加与删除什么。</dd>
+      <dt>判定</dt><dd>用 unix <code>patch</code> 应用补丁；应用成功只是前提，之后还要运行该任务的 fail-to-pass 测试与 pass-to-pass 测试。补丁应用成功且所有测试通过，记为 resolved。</dd>
+      <dt>指标</dt><dd><code>% Resolved</code>：解决任务的比例。另有 <code>% Apply</code>：补丁能成功应用的比例，用来区分「格式不对」与「改错了」。</dd>
+    </dl>
+    <p class="source-ref">原文定位：PDF p.3、p.5–p.6；附录 A.4。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>第一步：三级过滤把 PR 变成任务</h3>
+    <p>Figure 2 把构造管线压成三个框：抓 PR、按属性过滤、按执行结果过滤。三个框对应论文 2.1 节的三级筛选，每一级都有明确的通过条件，且都可以在没有人工标注的情况下自动执行。</p>
+    <article class="artifact evidence-figure" data-label="Figure 2" data-role="method">
+      <figure>
+        <figcaption><strong>Figure 2</strong><span class="badge neutral">构造管线</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=2">图体 p.2</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-2.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-2.png" alt="SWE-bench Figure 2 三级构造管线" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">三个从左到右的圆角框：① Scrape PRs——12 popular repositories、&gt;90% Python Code；② Attribute Filter——Resolves an issue、Contributes tests；③ Execution Filter——Installs successfully、PR passes all tests。箭头表示逐级筛选。</p>
+        <p class="interpretation">第一级解决「从哪里来」：只取热门、以 Python 为主、许可证允许使用的仓库，保证文档、测试与维护质量。第二级解决「是否可验证」：PR 必须关联并解决 issue，且改动过测试文件，说明作者自己提供了验证手段。第三级解决「是否真的修好」：在隔离环境里安装依赖，把测试补丁先应用、再应用参考解，要求至少一个测试从失败变为通过。三个框合起来把「有问题的真实改动」变成「有隐藏测试的可执行任务」。</p>
+        <p class="limit">图中没有写每级的淘汰率；正文只给最终数 2,294，精确的逐级数量在附录 Table 10。属性过滤依赖关键词（如 fixes、closes）识别 issue 关联，会漏掉没有写关键词的 PR；执行过滤依赖测试环境，装不上的样本会被直接丢掉，可能系统性排除依赖复杂的仓库。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 2: SWE-bench task instances are created from merged pull requests that resolve an issue, contributes tests, and install successfully.</p></details>
+      </div>
+    </article>
+    <p>Table 10 给出逐级保留量。12 个仓库共抓到 93,139 条 PR，属性过滤后剩 11,407 条候选，执行验证后剩 2,294 条，总保留率约 2.46%。仓库之间差异极大：django 一家贡献 850 条，flask 只有 11 条；seaborn 从 1,004 条 PR 只剩 22 条，说明「有测试、能装上、能复现」的门槛并不均匀。</p>
+    <article class="artifact evidence-figure" data-label="Table 10" data-role="data">
+      <figure>
+        <figcaption><strong>Table 10</strong><span class="badge neutral">逐级保留量</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=20">图体 p.20</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-10.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-10.png" alt="SWE-bench Table 10 构造各阶段保留量" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">行是 12 个仓库加一行 Total；列依次是 Repo、Total PRs Crawled（抓到的 PR 数）、Post-Conversion（通过属性过滤的候选数）、Post-Validation (Final)（通过执行验证的最终任务数）。</p>
+        <p class="interpretation">第一列到第二列平均只保留约 12%，第二列到第三列再保留约 20%。django 的 16,914 条 PR 最终留下 850 条，是绝对数量最大的来源；pytest 从 5,147 条留下 119 条，flask 从 2,434 条只留下 11 条。这个分布直接决定基准的难度结构：django、sympy、scikit-learn、matplotlib 四个仓库合计 1,649 条，占全部任务的约 72%，小仓库的权重很低。</p>
+        <p class="limit">表中没有说明每个仓库的淘汰原因分布，也没有报告被淘汰样本的难度；保留率低不等于留下的样本更难，可能只是这些仓库的 PR 更常附带测试。最终任务数在仓库间高度不均衡，按仓库平均与按任务平均会得到不同的结论。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 10: Statistics for how many candidate task instances were kept after the completion of a stage across the construction and validation procedures.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.2、p.16–p.20（附录 A.1–A.3）。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>第二步：2,294 条任务的特征</h3>
+    <p>Table 1 是整篇论文的数据台账。它用均值与最大值描述 issue、代码库、参考补丁与测试四个维度，直接说明「长输入、跨文件、可验证」这三个设计目标是否成立。</p>
+    <article class="artifact evidence-figure" data-label="Table 1" data-role="data">
+      <figure>
+        <figcaption><strong>Table 1</strong><span class="badge neutral">数据特征</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=4">图体 p.4</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-1.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-1.png" alt="SWE-bench Table 1 任务特征统计" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">三列：属性、指标、Mean（均值）与 Max（最大值）。四组属性分别是 Issue Text（问题文本长度，单位词）、Codebase（非测试文件数与行数）、Gold Patch（参考补丁改动的行数、文件数、函数数）、Tests（fail-to-pass 测试数与测试总数）。</p>
+        <p class="interpretation">issue 平均 195.1 词，最长 4,477 词；代码库平均 3,010 个非测试文件、43.8 万行，最大 5,890 个文件、88.6 万行。参考补丁平均改 32.8 行、1.7 个文件、3.0 个函数，说明真实修复确实跨文件，但改动量并不大，难点在「找到该改哪几行」。每个任务平均有 9.1 个 fail-to-pass 测试，测试总数平均 120.8 个；正文补充说 40% 的任务至少有两个 fail-to-pass 测试，pass-to-pass 的中位数是 51 个，回归保护确实起作用。</p>
+        <p class="limit">均值会被长尾拉高：最大参考补丁改 5,888 行、最大代码库 88.6 万行，均值不能代表典型任务。表中没有给中位数与分位数，也没有按仓库分组；附录 Table 17 才给出部分仓库的细分。测试数量不等于测试质量，弱测试或 flaky 测试会让判定偏松。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 1: Average and maximum numbers characterizing different attributes of a SWE-bench task instance. Statistics are micro-averages calculated without grouping by repository.</p></details>
+      </div>
+    </article>
+    <p>Figure 3 补上仓库分布。它用饼图给出每个仓库的任务数，读者可以一眼看出基准被哪几个大仓库主导；这与 Table 10 的逐级保留量互相印证。</p>
+    <article class="artifact evidence-figure" data-label="Figure 3" data-role="data">
+      <figure>
+        <figcaption><strong>Figure 3</strong><span class="badge neutral">仓库分布</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=4">图体 p.4</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-3.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-3.png" alt="SWE-bench Figure 3 任务在仓库间的分布" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">饼图，每块是一个仓库，括号内是该仓库的任务数：django 850、sympy 386、scikit-learn 229、sphinx 187、matplotlib 184、pytest 119、xarray 110、astropy 95、pylint 57、requests 44、seaborn 22、flask 11。</p>
+        <p class="interpretation">django 与 sympy 两块合计 1,236 条，超过全量的一半；flask 只有 11 条、seaborn 22 条，单个任务的成败就能明显改变这两个仓库的分数。饼图的切分依据是任务数，与仓库规模无关，因此它反映「评测权重」，不反映「代码库体量」。后文的 per-repo 结果必须在心里按这个权重折算，否则容易把 requests 的高分解读成整体能力。</p>
+        <p class="limit">饼图没有标百分比，也没有把 12 个仓库按领域分组；读者无法从图中判断仓库之间的难度差异。任务数少的小仓库在总体指标中几乎不可见，但在按仓库分析时又被赋予同等视觉权重。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 3: Distribution of SWE-bench tasks (in parenthesis) across 12 open source GitHub repositories that each contains the source code for a popular, widely downloaded PyPI package.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.3–p.4、p.26（Table 17）。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>第三步：一条任务记录长什么样</h3>
+    <p>Figure 7 给出官方示例。它把一条任务拆成 Metadata、Problem Statement、Test Patch、Gold Patch 四块，正好对应附录 A.2 的字段定义。下面按这张图与 Table 9 重建一条记录：<code>sympy__sympy-17022</code>，issue 编号 17006，PR 编号 17022，创建于 2019 年 6 月 9 日。</p>
+    <article class="artifact evidence-figure" data-label="Figure 7" data-role="data">
+      <figure>
+        <figcaption><strong>Figure 7</strong><span class="badge neutral">任务实例</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=17">图体 p.17</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-7.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-7.png" alt="SWE-bench Figure 7 任务实例示例" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">左上 Metadata：Repo、Instance ID、Created At、Issue #s、Pull Number、Base Commit；左下 Problem Statement：issue 原文与复现代码；右上 Test Patch：测试文件的 diff；右下 Gold Patch：<code>sympy/printing/pycode.py</code> 的 diff。红底为删除行，绿底为新增行。</p>
+        <p class="interpretation">这条 issue 说 <code>lambdify</code> 遇到单位矩阵时把 <code>I</code> 打印成 Python 复数单位，期望输出是 <code>numpy.eye</code> 形式。Gold Patch 新增 <code>_print_Identity</code>，在维度都是整数时输出 <code>numpy.eye</code>，否则抛出「符号维度尚不支持」的错误；Test Patch 在 <code>test_NumPyPrinter</code> 里追加四个断言，分别检查 <code>sign</code>、矩阵求逆、矩阵幂与单位矩阵的打印结果。测试补丁与参考解分开存放，模型看不到测试，只能从 issue 推断行为。</p>
+        <p class="limit">图中把代码做了省略与重排，不能当作完整 diff 使用；<code>base_commit</code> 只显示前七位，完整哈希与仓库镜像需要从数据集取得。Figure 7 没有展开 fail-to-pass 与 pass-to-pass 列表，这两个字段由执行日志生成。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 7: SWE-bench task instance example. Problem statement P is an aggregation of the issues related to the pull request. Codebase C corresponds to a repository and base commit. The tests T and solution D are derived from the original PR's associated code changes. Stylized for readability.</p></details>
+      </div>
+    </article>
+    <article class="artifact evidence-figure" data-label="Table 9" data-role="method">
+      <figure>
+        <figcaption><strong>Table 9</strong><span class="badge neutral">字段定义</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=17">图体 p.17</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-9.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-9.png" alt="SWE-bench Table 9 任务字段定义" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">两列：Field（字段名）与 Description（类型与含义）。共 15 个字段：base commit、created at、hints text、instance id、issue numbers、patch、problem statement、pull number、test patch、version、repo、FAIL TO PASS、PASS TO PASS、env install commit。</p>
+        <p class="interpretation">这套字段把「任务」拆成四块：代码库由 <code>repo</code> 与 <code>base commit</code> 定位；问题由 <code>problem statement</code> 与 <code>hints text</code> 描述；答案与隐藏测试分别是 <code>patch</code> 与 <code>test patch</code>；判定由 <code>FAIL TO PASS</code>、<code>PASS TO PASS</code> 与 <code>env install commit</code> 支撑。值得注意的是 <code>hints text</code> 在该版本实验中并未使用，作者把它留给后续研究。</p>
+        <p class="limit">字段定义只说明「是什么」，没有说明缺失值如何处理；不同仓库的 <code>version</code> 获取方式不一致（读源码、本地构建或按时间推断），可能影响按版本分析。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 9: Description of each field of a SWE-bench task instance object. See § A.2 for details regarding how each field is collected.</p></details>
+      </div>
+    </article>
+    <pre class="data-record">{
+  "instance_id": "sympy__sympy-17022",
+  "repo": "sympy/sympy",
+  "base_commit": "b6fbc76…",
+  "created_at": "2019-06-09",
+  "issue_numbers": [17006],
+  "pull_number": 17022,
+  "problem_statement": "Using lambdify on an expression containing an identity matrix gives us an unexpected result: the code printer prints I, which is interpreted as a Python built-in complex number. The printer should support identity matrices. The output should be array([[2, 2], [3, 5]]), since we are adding an identity matrix to the array.",
+  "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\n@@\n+    def _print_Identity(self, expr):\n+        shape = expr.shape\n+        if all([dim.is_Integer for dim in shape]):\n+            return self._module_format('numpy.eye')(...)\n+        raise NotImplementedError(\n+            'Symbolic matrix dimensions are not yet supported for identity matrices')",
+  "test_patch": "diff --git a/sympy/printing/tests/test_pycode.py b/sympy/printing/tests/test_pycode.py\n@@ def test_NumPyPrinter():\n+    assert p.doprint(sign(x)) == 'numpy.sign(x)'\n+    assert p.doprint(A**-1) == 'numpy.linalg.inv(A)'\n+    assert p.doprint(A**5) == 'numpy.linalg.matrix_power(A, 5)'\n+    assert p.doprint(Identity(3)) == 'numpy.eye(3)'",
+  "FAIL_TO_PASS": [
+    "sympy/printing/tests/test_pycode.py::test_NumPyPrinter"
+  ],
+  "PASS_TO_PASS": [
+    "（其余既有打印测试，由执行日志生成）"
+  ],
+  "version": "1.4"
+}</pre>
+    <p><strong>逐字段解释。</strong><code>instance_id</code> 由仓库与 PR 编号拼成，是全数据集的唯一键；<code>repo</code> 与 <code>base_commit</code> 用来克隆仓库镜像并检出修复前的代码，缺一不可；<code>created_at</code> 用于按时间切分，检查模型是否靠训练语料「背」出了补丁；<code>issue_numbers</code> 与 <code>pull_number</code> 保留数据来源，方便回查原始讨论；<code>problem_statement</code> 是 issue 标题、正文与 PR 首次提交前评论的拼接，刻意排除修复后的讨论，避免泄漏答案；<code>patch</code> 是参考解，只在评测时用于生成测试状态，不发给模型；<code>test_patch</code> 是隐藏测试，模型看不到；<code>FAIL_TO_PASS</code> 列出补丁前失败、补丁后应当通过的测试，是「是否解决」的核心判据；<code>PASS_TO_PASS</code> 列出补丁前后都应通过的测试，用来抓回归；<code>version</code> 记录仓库版本，辅助复现依赖。</p>
+    <p><strong>为什么这条记录能检验真实工程能力。</strong>第一，模型要先在 sympy 的数千个文件里定位 <code>pycode.py</code> 的打印机类，不能只靠题面关键词。第二，修复要理解 SymPy 的表达式类型与 NumPy 打印约定，写出新的 <code>_print_Identity</code> 分支。第三，补丁必须符合 unified diff 格式，行号与上下文错一处就应用失败。第四，判定同时看新测试与旧测试：只让新断言通过、却弄坏其他打印行为的补丁会被 pass-to-pass 拦下。第五，测试补丁不在输入里，模型必须从 issue 描述推断「单位矩阵应该打印成什么」，无法照抄答案。</p>
+    <p class="source-ref">字段语义依据 PDF p.17–p.18（附录 A.2、Table 9）；任务内容取自 Figure 7；<code>FAIL_TO_PASS</code> 条目按测试补丁与 A.4 的判定逻辑复原，PDF 未直接印出列表。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>第四步：代码库放不进上下文，怎样检索</h3>
+    <p>平均 43.8 万行代码不可能整份塞进模型，作者比较两种上下文来源。BM25 是真实可部署的稀疏检索：用 issue 文本当查询，按词项匹配召回文件，尽量填满上下文预算。oracle 是分析用的上界：直接给出参考解实际修改过的文件，模拟「已经知道该看哪里」。两者的差距，用来衡量「检索找错文件」对最终成绩的影响。</p>
+    <p>Table 3 给出 BM25 相对 oracle 文件的召回率。13k 上下文时，平均只召回 29.58% 的 oracle 文件，至少召回一个文件的比例是 34.77%；把预算加到 50k，平均召回升到 51.06%，仍有近一半 oracle 文件没被找到。这解释了后文一个重要现象：上下文变长会提高召回，却不一定提高解题率。</p>
+    <article class="artifact evidence-figure" data-label="Table 3" data-role="result">
+      <figure>
+        <figcaption><strong>Table 3</strong><span class="badge neutral">检索召回</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=5">图体 p.5</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-3.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-3.png" alt="SWE-bench Table 3 BM25 检索召回" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">列是三个最大上下文长度 13k、27k、50k；行是三种统计口径：Avg.（平均召回率）、All（oracle 文件全部被召回的比例）、Any（至少召回一个 oracle 文件的比例）。</p>
+        <p class="interpretation">从 13k 到 50k，Avg. 从 29.58 升到 51.06，All 从 26.09 升到 45.90，Any 从 34.77 升到 58.38。三行都随预算上升，说明检索确实能从更多上下文里找到更多相关文件；但即使 50k，仍有过半任务没有找全参考文件。All 与 Any 的差距说明「找到一个相关文件」比「找全所有相关文件」容易得多，而跨文件修复往往需要后者。</p>
+        <p class="limit">召回是相对 oracle 文件计算的，oracle 文件本身不一定包含解题所需的全部上下文；召回率高也不代表模型能用好这些文件。BM25 只匹配词项，不理解代码结构，对命名不直观的函数天然不利。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 3: BM25 recall with respect to oracle files for different maximum context lengths.</p></details>
+      </div>
+    </article>
+    <p>Table 4 固定了各模型的上下文上限与「能完整看到 oracle 文件的任务比例」。ChatGPT-3.5 只能覆盖 58.1% 的任务，GPT-4 覆盖 84.1%，Claude 2 覆盖 96.4%，SWE-Llama 至少覆盖 94.8%。模型之间的比较因此并不完全公平：上下文短的模型在 oracle 设置下先天少看一部分文件。</p>
+    <article class="artifact evidence-figure" data-label="Table 4" data-role="result">
+      <figure>
+        <figcaption><strong>Table 4</strong><span class="badge neutral">上下文覆盖</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=5">图体 p.5</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-4.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-4.png" alt="SWE-bench Table 4 各模型上下文长度与覆盖比例" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">列是四个模型：ChatGPT-3.5、GPT-4、Claude 2、SWE-Llama；两行分别是 Max. Tokens（最大上下文 token 数）与 % of Instances（能容纳 oracle 文件的任务比例）。</p>
+        <p class="interpretation">ChatGPT-3.5 的 16,385 token 只能覆盖 58.1% 的任务，GPT-4 的 32,768 覆盖 84.1%，Claude 2 的 100,000 覆盖 96.4%，SWE-Llama 的 ≥100,000 覆盖至少 94.8%。这张表是后文所有跨模型比较的前提：在 oracle 设置下，Claude 2 与 SWE-Llama 看到的信息量接近，ChatGPT-3.5 与 GPT-4 则明显少看。作者在正文里也提醒，token 长度不能直接横比，Llama 分词后的序列平均比 GPT-4 长约 42%。</p>
+        <p class="limit">「覆盖比例」只说明上下文放得下，不说明模型能有效利用；长上下文模型仍可能在中段丢失信息。SWE-Llama 的 ≥100,000 是下界，具体上限没有给出。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 4: We compare the different context lengths and proportion of the "oracle" retrieval setting covered. Models with shorter context lengths are thus inherently disadvantaged. Note that descriptions of token-lengths is a relative non-standard measure (e.g. Llama-tokenized sequences are 42% longer on average than the equivalent sequence tokenized for GPT-4).</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.5（第 4.1 节）、附录 A.4。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>第五步：SWE-Llama 怎样把开源模型拉进同一张表</h3>
+    <p>论文没有只做评测，还发布训练集与两个微调模型。训练数据按同一套管线从另外 37 个热门 Python 仓库收集，共 19,000 条 issue-PR 对；与评测集的区别是不再要求 PR 修改测试文件，因此规模更大。为控制显存，作者只微调注意力子层的 LoRA 权重（r=16、α=16、dropout=0.05），并剔除超过 30,000 token 的训练序列，有效样本降到 10,000 条。</p>
+    <p>训练目标是给定 issue 文本与相关代码文件，生成参考补丁。SWE-Llama 7b 以 CodeLlama-Python 7b 初始化，在 4 张 A100 上训练 20 小时；13b 以 CodeLlama-Python 13b 初始化，在 8 张 A100 上训练 47 小时。学习率 6e-4，批大小 32，最多 4 个 epoch，每 50 步存一次检查点，最后按 100 条留出样本的验证损失选模型。作者还用了 DeepSpeed Ulysses 与 Flash Attention 支撑长上下文训练。</p>
+    <p class="limit">训练集仓库与评测集仓库不相交，这是防泄漏的正确做法；但训练时模型看到的上下文是 oracle 文件，评测主表用的是 BM25 检索，两者分布不一致。后文会看到，SWE-Llama 在 BM25 下只有 0.70%，在 oracle 下升到 3.01% 与 3.97%，差距主要来自这个分布偏移。</p>
+    <p class="source-ref">原文定位：PDF p.4（第 3 节）、p.25（附录 B.1）。</p>
+  </section>
+</section>
+
+<section class="chapter" id="experiments">
+  <div class="chapter-head"><span class="number">04</span><h2>实验怎样回答问题</h2></div>
+
+  <section class="tech-step">
+    <h3>先把评测条件固定下来</h3>
+    <p>评测集是 2,294 条任务，主表使用 BM25 检索；每个模型在能放得下的上下文预算内选表现最好的设置，正文以 13k、27k、50k 三档做消融。输入由任务说明、issue 文本、检索文件与文档、一个 patch 格式示例组成。判定统一为「补丁能应用 + fail-to-pass 全过 + pass-to-pass 全过」。模型池为 ChatGPT-3.5、GPT-4、Claude 2 与 SWE-Llama 7b/13b；其中 GPT-4 因预算限制，在 BM25 27k 与 oracle 设置下只跑了 25% 的随机子集（574 条）。</p>
+    <p class="source-ref">原文定位：PDF p.5–p.6、p.25–p.27（附录 C）。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>问题一：模型到底能解出多少？</h3>
+    <p>Table 5 是主结果。它同时报告 <code>% Resolved</code> 与 <code>% Apply</code>：前者是「应用成功且测试全过」，后者只是「补丁能打上」。两列放在一起，可以把「不会写 diff」与「改错了逻辑」分开。</p>
+    <article class="artifact evidence-figure" data-label="Table 5" data-role="result">
+      <figure>
+        <figcaption><strong>Table 5</strong><span class="badge">主结果</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=6">图体 p.6</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-5.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-5.png" alt="SWE-bench Table 5 BM25 主结果" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">列分成两组：SWE-bench 全量（% Resolved、% Apply）与 SWE-bench Lite（% Resolved、% Apply）。行是六个模型：Claude 3 Opus、Claude 2、ChatGPT-3.5、GPT-4-turbo、SWE-Llama 7b、SWE-Llama 13b。数值单位为百分比，加粗为该列最佳。</p>
+        <p class="interpretation">全量上，Claude 3 Opus 3.79% 最高，Claude 2 1.97%，GPT-4-turbo 1.31%，SWE-Llama 两个尺寸都是 0.70%，ChatGPT-3.5 只有 0.17%。Lite 上排序类似但分数更高：Claude 3 Opus 4.33%、Claude 2 3.00%、GPT-4-turbo 2.67%、SWE-Llama 7b 1.33%、13b 1.00%，ChatGPT-3.5 0.33%。最值得对照的是 Apply 列：SWE-Llama 13b 的补丁应用率 53.62%，高于 Claude 2 的 43.07%，但解决率只有 0.70%，说明它学会了 diff 格式，却没有学会改对逻辑；Claude 2 的应用率更低，解决率却更高，错误更多发生在语义层。</p>
+        <p class="limit">六个模型不是同一代、同一规模，Table 5 没有给参数量；GPT-4-turbo 与附录 Table 18 的 GPT-4 不是同一个模型，不能混用。全量与 Lite 的排序不完全一致，Lite 只覆盖 11 个仓库，分数不能直接外推到全量。表中没有置信区间与多次运行结果。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 5: We compare models against each other using the BM25 retriever as described in Section 4.</p></details>
+      </div>
+    </article>
+    <p>按仓库拆开后，难度差异比总分更明显。Figure 4 与 Table 19 都使用 oracle 设置：前者用条形图比较 ChatGPT-3.5、Claude 2 与 SWE-Llama 13b，后者给出五个模型在 12 个仓库上的精确数值。requests 最容易，Claude 2 解出 15.91%；seaborn 全场为 0；flask 只有 SWE-Llama 13b 拿到 9.09%，Claude 2 与 ChatGPT-3.5 都是 0。这个分布说明「平均分」掩盖了仓库级的能力差异。</p>
+    <article class="artifact evidence-figure" data-label="Figure 4" data-role="result">
+      <figure>
+        <figcaption><strong>Figure 4</strong><span class="badge neutral">仓库级结果</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=6">图体 p.6</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-4.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-4.png" alt="SWE-bench Figure 4 各仓库解决率" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">横轴是 12 个仓库；纵轴是 % Resolved（oracle 设置），范围 0–15。每个仓库有三根柱子，分别对应 ChatGPT-3.5（蓝）、Claude 2（橙）、SWE-Llama 13b（黄）。</p>
+        <p class="interpretation">requests 是唯一明显的高地：Claude 2 15.91%、SWE-Llama 13b 13.64%；django 次之，Claude 2 6.15%；xarray、pytest、sphinx、scikit-learn 在 5%–7% 区间。seaborn 三根柱子都为 0，matplotlib 与 flask 也很低。模型之间的排序并不总是稳定：flask 上 SWE-Llama 9.09% 高于 Claude 2 的 0，scikit-learn 上 Claude 2 5.41% 高于 SWE-Llama 3.12%。这说明「谁更强」依赖仓库与代码风格，不能只看一个总分。</p>
+        <p class="limit">纵轴只到 15%，django 与 requests 的差异被压缩；没有画置信区间，flask 只有 11 条、seaborn 只有 22 条，单条任务就能造成大幅波动。图中只比较三个模型，Claude 3 Opus 与 GPT-4 不在内。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 4: Resolution rate for three models across the 12 repositories represented in SWE-bench in the "Oracle" retrieval setting.</p></details>
+      </div>
+    </article>
+    <article class="artifact evidence-figure" data-label="Table 19" data-role="result">
+      <figure>
+        <figcaption><strong>Table 19</strong><span class="badge neutral">逐仓库数值</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=27">图体 p.27</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-19.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-19.png" alt="SWE-bench Table 19 各仓库解决率数值" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">行是 12 个仓库的 owner/name；列是 Claude 2、ChatGPT-3.5、GPT-4、SWE-Llama 13b、SWE-Llama 7b；单元格是 oracle 设置下的 % Resolved。</p>
+        <p class="interpretation">Claude 2 在 11 个仓库上都非零，只有 seaborn 为 0；ChatGPT-3.5 在 astropy、seaborn、xarray、pylint、pytest、scikit-learn、sympy 七个仓库上为 0；GPT-4 在 astropy、matplotlib、seaborn、xarray、pylint、pytest、scikit-learn、sphinx、sympy 九个仓库上为 0，但在 requests 上有 8.33%。SWE-Llama 13b 在 flask 上 9.09%，是表中唯一在 flask 非零的模型；在 seaborn 上所有模型都是 0。这些零值不完全是能力问题，也和仓库任务数少、参考补丁跨文件多、测试严格有关。</p>
+        <p class="limit">GPT-4 只跑了 25% 子集，逐仓库样本更少，零值可能只是抽样波动；seaborn 22 条、flask 11 条，逐仓库分数非常不稳。表中没有给每个仓库的样本数，读者需要回到 Figure 3 对照。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 19: % Resolved for models per repository represented in SWE-bench.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.6–p.7、p.26–p.27。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>问题二：低分是「找不到文件」还是「改不对」？</h3>
+    <p>Table 18 是 oracle 设置的主结果：直接给参考解修改过的文件，省掉检索。与 Table 5 的 BM25 结果对照，Claude 2 从 1.97% 升到 4.80%，SWE-Llama 7b 从 0.70% 升到 3.01%，13b 从 0.70% 升到 3.97%，ChatGPT-3.5 从 0.17% 升到 0.52%。检索正确性能让分数翻倍甚至更多，但即使把正确文件直接递到面前，最好的模型也只有 4.80%。</p>
+    <article class="artifact evidence-figure" data-label="Table 18" data-role="result">
+      <figure>
+        <figcaption><strong>Table 18</strong><span class="badge">oracle 结果</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=26">图体 p.26</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-18.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-18.png" alt="SWE-bench Table 18 oracle 检索结果" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">两列：% Resolved 与 % Apply；行是五个模型：Claude 2、ChatGPT-3.5、GPT-4*、SWE-Llama 7b、SWE-Llama 13b。星号表示 GPT-4 只在 25% 随机子集上评测。</p>
+        <p class="interpretation">Claude 2 4.80%、SWE-Llama 13b 3.97%、SWE-Llama 7b 3.01%、GPT-4* 1.74%、ChatGPT-3.5 0.52%。应用率方面，SWE-Llama 13b 66.78% 最高，SWE-Llama 7b 65.52%，Claude 2 62.82%，GPT-4* 34.00%，ChatGPT-3.5 21.80%。把这张表与 Table 5 并排，可以看出两件事：检索确实重要，但 oracle 并没有把任务变简单；SWE-Llama 的应用率很高而解决率低于 Claude 2，说明「格式对」与「逻辑对」是两种能力。</p>
+        <p class="limit">oracle 设置本身不现实，工程师事先不知道要改哪些文件；而且「参考解改过的文件」不一定包含理解行为所需的全部上下文，4.80% 不能当成模型能力的上界。GPT-4* 的子集与其他模型的全量不可直接比较。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 18: We compare models against each other using the oracle retrieval settings as described in Section 4. The main results table, Table 5, presents the results for the different models when using BM25 only. * Due to budget constraints we evaluate GPT-4 on a 25% random subset of SWE-bench in the "Oracle" and BM25 27K retriever settings only.</p></details>
+      </div>
+    </article>
+    <p>Table 6 再往前一步：仍然给 oracle 文件，但把文件里与参考补丁无关的代码折叠掉，只保留改动行前后各 15 行。这等于替模型完成「文件内定位」。结果所有模型都上升：Claude 3 Opus 9.39%、Claude 2 5.93%、GPT-4 3.40%、ChatGPT-3.5 1.09%。Claude 3 Opus 从全量 BM25 的 3.79% 提到 9.39%，说明「在大文件里找到该改的那几行」本身就是主要瓶颈之一。</p>
+    <article class="artifact evidence-figure" data-label="Table 6" data-role="result">
+      <figure>
+        <figcaption><strong>Table 6</strong><span class="badge neutral">折叠上下文</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=7">图体 p.7</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-6.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-6.png" alt="SWE-bench Table 6 oracle-collapsed 结果" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">两列：Resolved 与 Applied；行是 Claude 3 Opus、Claude 2、GPT-4、ChatGPT-3.5。设置是「Oracle-collapsed」：使用 oracle 文件，但把参考补丁未直接修改的代码折叠，只保留 ±15 行。</p>
+        <p class="interpretation">Claude 3 Opus 9.39%、Claude 2 5.93%、GPT-4 3.40%、ChatGPT-3.5 1.09%；应用率分别为 48.00%、68.18%、48.65%、40.93%。与 Table 18 的 oracle 全文件结果相比，Claude 3 Opus 从（BM25 全量）3.79% 提升到 9.39%，Claude 2 从 4.80% 提到 5.93%，GPT-4 从 1.74% 提到 3.40%。折叠无关代码既减少干扰，也降低上下文长度，两个因素同时起作用，论文没有把二者拆开。</p>
+        <p class="limit">「保留 ±15 行」是人为给定的定位信息，真实场景没有这个先验；因此这张表衡量的是「定位之后再修」的能力，不能当作端到端上限。不同模型的上下文长度不同，折叠带来的收益也不能直接横比。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 6: We show the results for the "Oracle"-collapsed retrieval setting, which uses oracle files but collapses code that isn't directly modified by the PR ±15 lines.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.5–p.7。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>问题三：上下文越多越好吗？</h3>
+    <p>Table 2 直接给出反直觉结果：BM25 预算从 13k 加到 50k，三个模型的解决率都下降。Claude 2 从 1.96% 降到 1.22%，SWE-Llama 7b 与 13b 从 0.70% 降到 0.00%。这与 Table 3 的召回上升并不矛盾：检索确实找到了更多相关文件，但模型同时看到了更多无关代码，定位反而更难。</p>
+    <article class="artifact evidence-figure" data-label="Table 2" data-role="result">
+      <figure>
+        <figcaption><strong>Table 2</strong><span class="badge neutral">上下文消融</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=5">图体 p.5</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-2.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-2.png" alt="SWE-bench Table 2 BM25 不同上下文长度的解决率" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">列是最大上下文长度 13k、27k、50k；行是 Claude 2、SWE-Llama 7b、SWE-Llama 13b；单元格是 % Resolved。</p>
+        <p class="interpretation">三个模型都在 13k 最好：Claude 2 1.96%、两个 SWE-Llama 0.70%。到 27k，Claude 2 降到 1.87%，SWE-Llama 7b 降到 0.31%、13b 降到 0.48%；到 50k，Claude 2 只剩 1.22%，两个 SWE-Llama 都归零。作者的解释是模型被大量无关代码干扰，难以定位真正要改的行；这与「Lost in the Middle」一类长上下文研究一致。也就是说，检索的召回提升没有转化为解题率，瓶颈在「用」而不在「找」。</p>
+        <p class="limit">每个模型只报告了放进其上下文窗口的预算，模型之间的可用档位不完全相同；没有报告同一模型在固定预算下的多次运行。13k 的胜利也可能只是「少看少错」，不能推出「检索越少越好」。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 2: Model resolve rates with BM25 retrieval, with different maximum context lengths.</p></details>
+      </div>
+    </article>
+    <p>Figure 5 从两个维度重复这个结论。左图按输入总 token 数分组：输入少于 20k 时 Claude 2 的解决率约 7%，20k–50k 降到约 2.5%，50k–100k 约 1%，超过 100k 接近 0；右图按 issue 本身的 token 数分组，四组的解决率都在 3%–5% 之间，没有明显单调趋势。作者据此把「上下文变长导致变差」归因于无关代码的干扰；「问题描述变复杂」这一解释被排除。</p>
+    <article class="artifact evidence-figure" data-label="Figure 5" data-role="result">
+      <figure>
+        <figcaption><strong>Figure 5</strong><span class="badge neutral">长度分析</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=7">图体 p.7</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-5.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-5.png" alt="SWE-bench Figure 5 Claude 2 按输入与 issue 长度的表现" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">两个并排的柱状图，纵轴都是 % of Tasks（0–50）。左图横轴是输入总 token 数：&lt;20k、20k–50k、50k–100k、&gt;100k；右图横轴是 issue token 数：&lt;500、500–1k、1k–2k、&gt;2k。每组有两根柱子：蓝色 Resolved、橙色 Applied。</p>
+        <p class="interpretation">左图的橙色柱（能应用）从 &lt;20k 的约 50% 一路降到 &gt;100k 的约 8%，蓝色柱（解决）从约 7% 降到接近 0；右图两组柱子基本平稳，Applied 在 38%–45%，Resolved 在 3%–5%。这说明「输入里有更多代码」同时压低应用率与解决率，而「issue 写得更长」并不会。作者把前者解释为长上下文中的定位困难，把后者解释为问题描述长度本身不是主要障碍。</p>
+        <p class="limit">这是 Claude 2 单模型的分析，其他模型只在正文中被提到「也观察到类似行为」，没有给图。横轴是分桶，桶内分布不均，且输入长度与仓库、任务难度相关，不能当作因果。Applied 下降也可能包含格式错误，不全是定位问题。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 5: We compare the performance of Claude 2 on tasks partitioned by total input length and by only the issue length.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.5、p.7。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>问题四：模型写出的补丁是什么样？</h3>
+    <p>Table 8 比较模型补丁与参考补丁的编辑量。模型补丁明显更短：Claude 2 平均 19.6 行，参考补丁 44.1 行；SWE-Llama 7b 只有 16.7 行，参考补丁 40.2 行。所有参考补丁的均值是 74.5 行，其中新增 22.3、删除 10.5、平均改 3.0 个函数、1.7 个文件；模型补丁平均只改约 1 个文件。模型倾向于写「最小可行补丁」，缺少参考解那种顺手重构与防御性修改。</p>
+    <article class="artifact evidence-figure" data-label="Table 8" data-role="result">
+      <figure>
+        <figcaption><strong>Table 8</strong><span class="badge neutral">补丁长度</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=8">图体 p.8</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/table-8.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-8.png" alt="SWE-bench Table 8 模型补丁与参考补丁的编辑量" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">列是 Total Lines、Added、Removed、Functions、Files；行按模型分组，每个模型下面一行是该模型对应任务的参考补丁（Gold），最后两行是 Avg Gold 与 All Gold。统计只覆盖补丁应用成功的样本，设置是 oracle 检索。</p>
+        <p class="interpretation">Claude 2 的生成补丁平均 19.6 行，对应任务的参考补丁 44.1 行；ChatGPT-3.5 30.1 对 39.6；GPT-4 20.9 对 33.6；SWE-Llama 13b 17.6 对 37.8；7b 16.7 对 40.2。所有模型都只改约 1.0–1.2 个文件，参考补丁平均 1.1–1.2 个文件（按模型子集），全量参考补丁是 1.7 个。新增行数差距更大：模型 1.3–4.4 行，参考补丁 8.4–12.0 行。All Gold 的 22.3 新增加 10.5 删除正好等于 Table 1 的 32.8 行改动，两个表能对上。</p>
+        <p class="limit">只统计「应用成功」的补丁，失败补丁的编辑量被排除，模型补丁可能因此显得更规整。Total Lines 与 Added+Removed 的口径不同，74.5 不是 32.8，读者容易误读；论文没有解释 Total Lines 具体包含什么。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Table 8: Average edits of model generated patches in the "oracle" retrieval setting across successfully applied patches. For the task instances specific to each model, we calculate the same statistics across the gold patches. Avg Gold shows statistics macro-averaged over each models' respective gold patches. All Gold shows statistics for all gold patches unconditioned on model performance.</p></details>
+      </div>
+    </article>
+    <p>Figure 6 用一个具体失败案例把「补丁短」与「改错」连起来。任务是 sphinx-8713：<code>napoleon_use_param</code> 配置应当同时影响 “Other Parameters” 段落的渲染。模型确实定位到了正确的函数 <code>_parse_other_parameters_section</code>，也生成了语法正确的补丁，但改动后的逻辑没有真正读取配置，最终 2 个测试失败、45 个通过。参考补丁则同时修改了参数解析与字段格式化两处，覆盖了配置分支。这个案例说明：模型能完成「找对文件 + 写对格式」，却常在「改对语义」上失败。</p>
+    <article class="artifact evidence-figure" data-label="Figure 6" data-role="result">
+      <figure>
+        <figcaption><strong>Figure 6</strong><span class="badge neutral">定性案例</span><a href="../../2310.06770%20-%20SWE-bench.pdf#page=8">图体 p.8</a></figcaption>
+        <a class="chart-image cropped-image" href="../assets/crops/2310.06770%20-%20SWE-bench/figure-6.png" target="_blank" rel="noopener"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-6.png" alt="SWE-bench Figure 6 sphinx-8713 案例" loading="lazy" decoding="async"></a>
+      </figure>
+      <div class="figure-explanation">
+        <p class="axes">四块：左上 Model Input（任务说明加 issue 原文）、右上 Gold Patch（参考解，红删绿增）、右中 Generated Patch（模型补丁）、右下 Generated Patch Test Results（测试日志）。底部是完整输入的行数与 token 数：1,558 行、20,882 token，oracle 设置。</p>
+        <p class="interpretation">参考补丁修改 <code>sphinx/ext/napoleon/docstring.py</code> 的 <code>_parse_other_parameters_section</code>，在配置开启时走新的参数解析分支；模型补丁也改了这个函数，但只调整了调用形式，没有真正把配置传进去。测试日志显示 2 failed、45 passed，失败的正是检查 “Other Parameters” 渲染的用例。它直观展示了「应用成功但解决失败」：补丁能打上，测试不通过，<code>% Apply</code> 会记一笔，但 <code>% Resolved</code> 不记。</p>
+        <p class="limit">这是作者挑选的 11 个案例之一，不能代表失败分布；单个案例无法说明错误类型的总体比例。测试日志只给通过/失败，没有给模型内部推理，因此「为什么改错」只能从补丁推断。</p>
+        <details class="original-caption"><summary>原始题注</summary><p>Figure 6: We show an example of an formatted task instance, a model prediction, and the testing framework logs. In the patches, red highlights are deletions. Green highlights are additions.</p></details>
+      </div>
+    </article>
+    <p class="source-ref">原文定位：PDF p.7–p.9、p.26–p.27。</p>
+  </section>
+
+  <section class="tech-step">
+    <h3>论文从结果里提炼的五条发现</h3>
+    <p><strong>第一，基准远未饱和。</strong>最好的 Claude 2 在真实检索下只解出 1.96%，Claude 3 Opus 也只有 3.79%；即使把 oracle 文件直接给出，Claude 2 也只有 4.80%。这与 HumanEval 上动辄八九十分的表现形成强烈反差，说明「会写函数」离「会修仓库」还有很长距离。</p>
+    <p><strong>第二，检索与定位是主要瓶颈之一。</strong>BM25 在 13k 下平均只召回 29.58% 的 oracle 文件；从 BM25 换到 oracle，Claude 2 从 1.97% 升到 4.80%；再把文件折叠到改动行 ±15 行，Claude 3 Opus 升到 9.39%。三种设置形成一条清晰的阶梯：找到文件、找到行、改对逻辑，每一步都在掉分。</p>
+    <p><strong>第三，更多上下文会伤害表现。</strong>Table 2 中三个模型都在 13k 最好，50k 时 SWE-Llama 归零；Figure 5 显示输入超过 100k 后 Claude 2 的解决率接近 0，而 issue 长度本身没有同样效应。作者把原因指向无关代码的干扰与长上下文中的定位困难。</p>
+    <p><strong>第四，模型补丁偏短、偏局部。</strong>模型平均只改约 20 行、1 个文件，参考补丁平均改 32.8 行、1.7 个文件；模型新增 1.3–4.4 行，参考补丁新增 8.4–12.0 行。模型倾向于「让眼前测试过」，缺少参考解那样的结构性修改与防御性处理。</p>
+    <p><strong>第五，格式能力与语义能力要分开看。</strong>SWE-Llama 13b 的补丁应用率 53.62%，高于 Claude 2 的 43.07%，但解决率只有 0.70%；Claude 2 应用率更低，解决率更高。Figure 6 的案例进一步说明，模型可以定位到正确函数并写出合法 diff，仍然改错配置分支。用单一成功率无法区分这两类失败。</p>
+    <p class="source-ref">原文定位：PDF p.5–p.9；发现为本笔记按论文数据归纳，论文原文以分节讨论呈现。</p>
+  </section>
+
+  <section class="evidence-synthesis">
+    <h3>把这些证据合起来，能说到哪一步？</h3>
+    <p>能站住的主张有五个。第一，SWE-bench 有明显区分度：BM25 下从 ChatGPT-3.5 的 0.17% 到 Claude 3 Opus 的 3.79%，oracle 下从 0.52% 到 4.80%，折叠上下文后到 9.39%；分数跨度足够大，没有把所有模型压到同一档。第二，任务确实跨文件、跨函数：参考补丁平均改 1.7 个文件、3.0 个函数、32.8 行，且 40% 的任务至少有两个 fail-to-pass 测试。第三，评测可执行、可复现：任务绑定 base commit，补丁必须应用成功并跑过真实测试，这比文本相似度或人工打分更硬。第四，瓶颈可以定位：检索召回、上下文长度、补丁长度与定性案例四组证据指向同一个结论——模型在「找对位置」与「改对语义」上都不够。第五，数据集同时是训练资源：37 个仓库的 19,000 条样本让 SWE-Llama 在 oracle 下达到 3.97%，接近 Claude 2 的 4.80%。</p>
+    <p>论文不能支持的主张也要说清楚。第一，没有人类基线：全文没有报告人类工程师在 2,294 条任务上的解决率或耗时，1.96% 只能与模型池内部比较，无法回答「离人类还有多远」。第二，任务全部是 Python，且来自 12 个热门、测试完善的大仓库；结论不能外推到其他语言、小项目或私有代码库。第三，判定只看测试是否通过：测试覆盖不到的 bug、风格问题、性能回退都不会被发现；论文自己在讨论中也承认，自动生成的补丁可能在可读性、效率与完整性上不如人类。第四，检索设置与模型版本强耦合：BM25 是 2023 年的基线，换成更强的检索或 agent 式多轮探索，分数会变；论文没有给出检索器消融之外的系统对比。第五，没有多次运行与置信区间：seaborn 22 条、flask 11 条，逐仓库分数很容易被单条任务左右；GPT-4 只在 25% 子集上评测，跨模型比较并不完全同分布。第六，训练集与评测集仓库不相交，但模型预训练语料可能包含这些公开仓库；作者用「2023 年前后」的时间切分做了检查，发现多数模型差异不大，但 GPT-4 在 2023 年后的样本上为 0，样本量也小，不能完全排除记忆效应。第七，环境可复现性依赖依赖版本与镜像，几年后部分任务可能装不上；论文提供镜像与脚本，但没有承诺长期维护。</p>
+  </section>
+
+  <section class="protocol-preview" id="evaluation-protocol">
+    <h3>本篇评测口径</h3>
+    <p><strong>测试集构造：</strong>从 PyPI 2023 年 8 月下载量前 5,000 的包中取前 100 个，核对许可证后确定 12 个 GitHub 仓库，抓取全部 PR 共 93,139 条。属性过滤要求 PR 已合并、通过 fixes/closes 等关键词关联并解决至少一个 issue、且修改了路径含 test/testing 的文件，剩 11,407 条。执行过滤要求在隔离环境安装成功，先应用测试补丁、再应用参考解，至少有一个测试从失败变为通过，且无安装/运行错误，最终剩 2,294 条。另有 300 条 Lite 子集，覆盖 11 个仓库，偏向自包含的功能性修复。</p>
+    <p><strong>成功判据：</strong>把模型补丁用 unix <code>patch</code> 应用到 base commit 的代码库；应用失败直接判未解决。应用成功后运行该任务的 <code>FAIL_TO_PASS</code> 与 <code>PASS_TO_PASS</code> 测试，前者必须全部由失败转为通过，后者必须保持通过；全部满足才记为 resolved。指标是 resolved 任务数除以总任务数。补丁应用成功但测试失败，只计入 <code>% Apply</code>，不计入 <code>% Resolved</code>。</p>
+    <p><strong>输入与检索：</strong>输入包含任务说明、issue 聚合文本、检索到的代码文件与文档、一个 patch 格式示例。主设置用 BM25 稀疏检索，按 issue 文本召回文件，最大上下文取 13k、27k、50k 三档；分析设置用 oracle（参考解修改过的文件）与 oracle-collapsed（只保留改动行 ±15 行）。</p>
+    <p><strong>模型与预算：</strong>ChatGPT-3.5（16,385 token）、GPT-4（32,768 token）、Claude 2（100,000 token）、SWE-Llama 7b/13b（≥100,000 token）。SWE-Llama 用 CodeLlama-Python 初始化，LoRA 微调，训练集来自另外 37 个仓库的 19,000 条样本（截断后 10,000 条）。</p>
+    <p><strong>基线：</strong>没有人类基线。比较对象是上述模型在 BM25、oracle 与 oracle-collapsed 三种设置下的结果。主结果的最佳值是 Claude 2 的 1.96%（BM25）与 4.80%（oracle）；Lite 上最佳是 Claude 3 Opus 的 4.33%。</p>
+    <p><strong>适用范围：</strong>Python、公开 GitHub 仓库、英文 issue、单轮生成补丁；不覆盖多语言、私有代码、多轮交互式调试、代码审查与性能优化。</p>
+    <p class="source-ref">原文定位：PDF p.2–p.6、p.16–p.22（附录 A.1–A.4）、p.25（附录 B）。</p>
+  </section>
+
+  <section class="source-discrepancies" id="source-discrepancies">
+    <h3>评测与数据核验记录</h3>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>核验项</th><th>原文记录</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">「约 9 万」与 93,139</th><td>正文第 2.1 节与第 3 页写「约 90,000 条 PR」，附录 Table 10 的精确总数是 93,139。两者不矛盾，正文取整，逐仓库数据以 Table 10 为准。</td></tr>
+          <tr><th scope="row">1.96 与 1.97</th><td>摘要、第 5 节与 Table 2 的 13k 设置都写 Claude 2 为 1.96%；Table 5 写 1.97%。差异只有 0.01 个百分点，可能来自不同检索预算或四舍五入，论文没有说明 Table 5 每个模型具体使用哪一档上下文。本笔记在引用主结果时保留原文的 1.97%，在引用 13k 消融时保留 1.96%。</td></tr>
+          <tr><th scope="row">2,294 与 93,139</th><td>Table 10 逐仓库相加：Total 行 93,139、11,407、2,294 与各行一致；最终保留率 2,294 ÷ 93,139 ≈ 2.46%。正文只给最终数，没有给中间数。</td></tr>
+          <tr><th scope="row">Lite 是 300 条、11 个仓库</th><td>正文称 Lite 为 300 条、覆盖 11 个仓库；全量是 12 个仓库。少的是哪一个、按什么标准筛，正文放在附录 A.7，本笔记未逐条核对 300 条的仓库分布。</td></tr>
+          <tr><th scope="row">训练集 19,000 与 10,000</th><td>从 37 个仓库收集 19,000 条 issue-PR 对，剔除超过 30,000 token 的序列后有效样本为 10,000 条。两个数字分别指「收集量」与「实际训练量」，不是矛盾。</td></tr>
+          <tr><th scope="row">GPT-4 与 GPT-4-turbo</th><td>Table 5 的主结果是 GPT-4-turbo；Table 18 与 Table 7 的 GPT-4 带星号，只在 25% 随机子集（574 条）上评测。两者是不同模型、不同样本量，不能把 1.31% 与 1.74% 直接对比。</td></tr>
+          <tr><th scope="row">oracle 设置下的分数提升</th><td>Claude 2 从 BM25 的 1.97% 升到 oracle 的 4.80%；SWE-Llama 7b 从 0.70% 升到 3.01%，13b 从 0.70% 升到 3.97%。提升幅度大，说明检索是主要瓶颈之一；但 oracle 使用了参考解修改过的文件，现实中不可得。</td></tr>
+          <tr><th scope="row">SWE-Llama 的训练/评测分布</th><td>SWE-Llama 训练时用 oracle 文件作为上下文，主表评测用 BM25 检索。BM25 下 0.70%、oracle 下 3.01%/3.97% 的差距，部分来自这个分布偏移，不能全归因于检索质量。</td></tr>
+          <tr><th scope="row">补丁长度 32.8 与 74.5</th><td>Table 1 的平均改动 32.8 行，等于 Table 8 的 All Gold 新增 22.3 加删除 10.5；Table 8 的 Total Lines 74.5 是另一种口径（可能包含上下文行），两者不是同一个统计量。论文没有解释 Total Lines 的构成。</td></tr>
+          <tr><th scope="row">Figure 6 的 2 failed / 45 passed</th><td>模型补丁能应用，但两个检查 “Other Parameters” 渲染的测试失败，因此不记 resolved。这个案例正好对应 Table 5 中「% Apply 高、% Resolved 低」的现象，不能把应用率当成解决率。</td></tr>
+          <tr><th scope="row">没有人类基线</th><td>全文没有人类工程师在 SWE-bench 上的解决率或耗时；1.96% 只能与模型池内部比较，无法回答「离人类还有多远」。</td></tr>
+          <tr><th scope="row">时间切分检查</th><td>Table 7 在 oracle 设置下按 2023 年前后切分：Claude 2 为 4.87% 与 4.23%，SWE-Llama 13b 为 3.98% 与 3.85%，差异不大；GPT-4* 为 1.96% 与 0.00%，但只在 25% 子集上，样本量小，不能据此断言没有记忆效应。</td></tr>
+          <tr><th scope="row">版本与日期</th><td>所读为 arXiv:2310.06770v3，52 页，2024 年 11 月 11 日；正文标注 ICLR 2024。版本更新后加入了 Claude 3 Opus 与 GPT-4-turbo，模型池与初版不同。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="evidence-question">
+    <h3>仍应保留的边界</h3>
+    <p>（1）全部任务都是 Python，且只来自 12 个热门、测试完善的开源仓库；小项目、私有代码、其他语言与遗留系统都不在覆盖范围内。（2）判定完全依赖仓库自带测试，测试覆盖不到的 bug、性能回退、可读性与安全问题不会被发现；论文自己也承认，通过测试不等于补丁质量高。（3）没有人类基线，也没有多次运行与置信区间；1.96%、3.79%、4.80% 这些数字只能做模型间相对比较，不能直接解读为「完成真实工作的概率」。（4）检索设置强依赖 BM25 与固定上下文预算，换成更强的检索器、agent 式多轮探索或仓库级代码索引，结果会显著变化；论文没有给出这些替代方案的对比。（5）GPT-4 只在 25% 子集上评测，SWE-Llama 训练与评测的上下文分布不一致，跨模型排序存在混杂因素。（6）oracle 与 oracle-collapsed 使用了参考解信息，现实中不可得；它们衡量的是「定位之后」的能力，不是端到端上限。（7）仓库会更新、依赖会漂移，任务绑定 base commit 与镜像只能延缓失效；论文没有给出长期维护与版本化评测的机制。（8）公开仓库可能进入模型预训练语料，时间切分只能提供有限证据；2023 年后的样本量小，无法排除记忆与污染。（9）任务在仓库间高度不均衡：django 850 条、flask 11 条，按任务平均与按仓库平均会得到不同结论；逐仓库分数对小样本仓库尤其不稳。</p>
+  </section>
+
+  <div class="gallery">
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-1.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-1.png" alt="Figure 1"><span>Figure 1 · p1</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-2.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-2.png" alt="Figure 2"><span>Figure 2 · p2</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-3.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-3.png" alt="Figure 3"><span>Figure 3 · p4</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-1.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-1.png" alt="Table 1"><span>Table 1 · p4</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-3.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-3.png" alt="Table 3"><span>Table 3 · p5</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-2.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-2.png" alt="Table 2"><span>Table 2 · p5</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-4.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-4.png" alt="Table 4"><span>Table 4 · p5</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-5.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-5.png" alt="Table 5"><span>Table 5 · p6</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-4.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-4.png" alt="Figure 4"><span>Figure 4 · p6</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-6.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-6.png" alt="Table 6"><span>Table 6 · p7</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-5.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-5.png" alt="Figure 5"><span>Figure 5 · p7</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-8.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-8.png" alt="Table 8"><span>Table 8 · p8</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-6.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-6.png" alt="Figure 6"><span>Figure 6 · p8</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-9.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-9.png" alt="Table 9"><span>Table 9 · p17</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/figure-7.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/figure-7.png" alt="Figure 7"><span>Figure 7 · p17</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-10.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-10.png" alt="Table 10"><span>Table 10 · p20</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-18.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-18.png" alt="Table 18"><span>Table 18 · p26</span></a>
+    <a href="../assets/crops/2310.06770%20-%20SWE-bench/table-19.png"><img src="../assets/crops/2310.06770%20-%20SWE-bench/table-19.png" alt="Table 19"><span>Table 19 · p27</span></a>
+  </div>
+</section>
+
+</main>
+</div>
+</body>
+</html>

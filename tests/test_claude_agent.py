@@ -261,3 +261,50 @@ def test_invalid_envelope_and_invalid_result_are_data_errors(claude_config, tmp_
 def test_factory_selects_provider(claude_config, config):
     assert isinstance(make_agent(claude_config), ClaudeAgent)
     assert make_agent(config).__class__.__name__ == "CodexAgent"
+
+
+def test_agentic_run_wraps_landlock_and_keeps_tools(claude_config, tmp_path, monkeypatch):
+    config = replace(
+        claude_config,
+        agent_model="deepseek-v4-pro",
+        reading_notes_sandbox_user="",
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return completed(envelope(result="done"))
+
+    monkeypatch.setattr("paper_collector.agent_common.run_isolated", run)
+    monkeypatch.setattr("paper_collector.claude_agent.sys.platform", "linux")
+
+    result = ClaudeAgent(config).run_agentic(
+        "work", workspace, timeout_seconds=60, model_override="deepseek-v4-pro"
+    )
+
+    assert result == "done"
+    command, kwargs = calls[0]
+    assert command[0] == __import__("sys").executable
+    assert "sandbox_exec.py" in command[1]
+    assert "--workspace" in command
+    assert str(workspace.resolve()) in command
+    assert "--json-schema" not in command
+    claude_at = command.index(config.claude_bin)
+    tail = command[claude_at:]
+    assert tail[tail.index("--tools") + 1] == "Read,Write,Edit,Bash"
+    assert tail[tail.index("--allowedTools") + 1] == "Read,Write,Edit,Bash"
+    assert tail[tail.index("--permission-mode") + 1] == "dontAsk"
+    assert tail[tail.index("--permission-prompts") + 1] == "none"
+    assert tail[tail.index("--add-dir") + 1] == str(workspace.resolve())
+    assert "--restricted" in tail
+    assert '"sandbox":{"enabled":false}' in tail[tail.index("--settings") + 1]
+    assert kwargs["cwd"] == workspace.resolve()
+    assert kwargs["input"] == "work"
+    assert kwargs["env"]["HOME"] == str(workspace / ".agent-home")
+    assert kwargs["env"]["TMPDIR"] == str(workspace / ".agent-tmp")
+    assert kwargs["env"]["PATH"].startswith(
+        str(__import__("pathlib").Path(__import__("sys").executable).parent)
+    )
+    assert (workspace / "agent.envelope.json").is_file()

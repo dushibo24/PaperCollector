@@ -7,9 +7,14 @@ import html
 import json
 import logging
 import math
+import os
+import pwd
 import re
 import secrets
+import shutil
 import struct
+import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -25,6 +30,8 @@ from paper_collector.config import AppConfig
 from paper_collector.models import Paper, Review
 from paper_collector.note_publishing import publish_remote_note
 from paper_collector.notes_http import MAX_NOTE_BYTES, PROGRESS_SCRIPT, PUBLIC_FILENAME
+from paper_collector.pdf_tools import safe_stem
+from paper_collector.process_tools import run_isolated
 from paper_collector.reading_note_schema import (
     NOTE_SCHEMA,
     PLAN_SCHEMA,
@@ -676,6 +683,152 @@ def render_note(note: dict[str, Any], plan: dict[str, Any], crops: list[Path], p
     return re.sub(r"\{\{([A-Z_]+)\}\}", lambda match: replacements[match.group(1)], template)
 
 
+def skill_visible_text(document: str) -> str:
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", document, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", "", html.unescape(text))
+
+
+def skill_title(document: str) -> str:
+    match = re.search(r"<h1[^>]*>(.*?)</h1>", document, flags=re.DOTALL | re.IGNORECASE)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", match.group(1)))).strip()
+
+
+def inline_skill_document(
+    document: str, workspace: Path, slug: str, paper: Paper
+) -> tuple[str, str, int]:
+    """Turn the skill's multi-file HTML into one self-contained document."""
+    html_path = workspace / "papers" / f"{slug}.html"
+    style = (workspace / "assets" / "style.css").read_text(encoding="utf-8")
+    script = (workspace / "assets" / "app.js").read_text(encoding="utf-8")
+    document = re.sub(
+        r'<link\b[^>]*href="[^"]*style\.css"[^>]*>',
+        lambda _: f"<style>{style}</style>",
+        document,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    document = re.sub(
+        r'<script\b[^>]*src="[^"]*app\.js"[^>]*>\s*</script>',
+        lambda _: f"<script>{script}</script>",
+        document,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if "<style" not in document.lower():
+        document = document.replace("</head>", f"<style>{style}</style></head>", 1)
+    if "<script" not in document.lower():
+        document = document.replace("</body>", f"<script>{script}</script></body>", 1)
+    document = re.sub(
+        r'<a\b[^>]*href="[^"]*assets/crops/[^"]*"[^>]*>(.*?)</a>',
+        r"\1",
+        document,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    document = re.sub(
+        r'href="[^"]*assets/crops/[^"]*"', 'href="#"', document, flags=re.IGNORECASE
+    )
+
+    mime_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+    }
+
+    def inline_image(match: re.Match) -> str:
+        prefix, source, suffix = match.group(1), match.group(2), match.group(3)
+        if source.startswith(("data:", "http://", "https://", "//")):
+            return match.group(0)
+        target = (html_path.parent / source).resolve()
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            return match.group(0)
+        if not target.is_file():
+            return match.group(0)
+        mime = mime_types.get(target.suffix.lower(), "application/octet-stream")
+        payload = base64.b64encode(target.read_bytes()).decode("ascii")
+        return f"{prefix}data:{mime};base64,{payload}{suffix}"
+
+    document = re.sub(
+        r'(<img\b[^>]*\bsrc=")([^"]+)(")', inline_image, document, flags=re.IGNORECASE
+    )
+
+    def rewrite_pdf(match: re.Match) -> str:
+        fragment = match.group(2) or ""
+        if paper.pdf_url:
+            return 'href="' + html.escape(paper.pdf_url, quote=True) + fragment + '"'
+        return 'href="#"'
+
+    document = re.sub(
+        r'href="([^"]*\.pdf)(#[^"]*)?"', rewrite_pdf, document, flags=re.IGNORECASE
+    )
+    document = re.sub(
+        r'href="(?!https?:|mailto:|#|data:)[^"]*"', 'href="#"', document, flags=re.IGNORECASE
+    )
+    for match in re.finditer(r'\bsrc="([^"]+)"', document):
+        source = match.group(1)
+        if not source.startswith(("data:", "http://", "https://", "//")):
+            raise ReadingNoteError(f"笔记仍引用未内联的本地资源：{source}")
+    document = re.sub(r"<!--.*?-->", "", document, flags=re.DOTALL)
+    remaining = re.findall(r"\{\{[^}]+\}\}", document)
+    if remaining:
+        raise ReadingNoteError(
+            "笔记仍有未替换的模板占位符：" + "、".join(remaining[:5])
+        )
+    title = skill_title(document)
+    if not title:
+        raise ReadingNoteError("笔记缺少 H1 标题")
+    artifact_count = len(re.findall(r'class="artifact', document))
+    return document, title, artifact_count
+
+
+def skill_validation_problems(
+    document: str, workspace: Path, slug: str, min_chars: int
+) -> list[str]:
+    problems = []
+    for anchor in SECTION_IDS:
+        if f'id="{anchor}"' not in document:
+            problems.append(f"缺少章节锚点 #{anchor}")
+    if 'id="reading-progress"' not in document:
+        problems.append("缺少阅读进度条")
+    if len(re.findall(r'class="artifact', document)) < 1:
+        problems.append("没有任何图表 artifact")
+    if len(re.findall(r'class="data-record"', document)) < 1:
+        problems.append("缺少 data-record")
+    for word in BANNED:
+        count = document.count(word)
+        if count:
+            problems.append(f"禁用词 {word} 出现 {count} 次")
+    remaining = re.findall(r"\{\{[^}]+\}\}", document)
+    if remaining:
+        problems.append("未替换的模板占位符：" + "、".join(remaining[:5]))
+    text_length = len(skill_visible_text(document))
+    if text_length < min_chars:
+        problems.append(f"正文只有 {text_length} 字符，低于要求 {min_chars}")
+    if not skill_title(document):
+        problems.append("缺少 H1 标题")
+    validator = workspace / "scripts" / "validate_note.py"
+    note_path = workspace / "papers" / f"{slug}.html"
+    if validator.is_file() and note_path.is_file():
+        completed = run_isolated(
+            [sys.executable, str(validator), str(note_path)],
+            timeout=120,
+            cwd=workspace,
+            encoding="utf-8",
+        )
+        if completed.returncode != 0:
+            output = (completed.stdout or completed.stderr or "")[-2000:]
+            problems.append("validate_note.py 未通过：\n" + output)
+    return problems
+
+
 class ReadingNotes:
     def __init__(self, config: AppConfig, agent: BaseAgent):
         self.config = config
@@ -734,6 +887,287 @@ class ReadingNotes:
                 LOGGER.info("笔记阶段 %s 使用模型：%s", stem, model or "默认")
             return result
         raise AgentUnavailableError("没有可用笔记模型")
+
+    def _skill_models(self) -> list[str | None]:
+        configured = self.config.reading_notes_model or self.config.agent_model
+        values = [self._preferred_model or configured, configured]
+        values.extend(self.config.reading_notes_fallback_models)
+        models = list(dict.fromkeys(value for value in values if value))
+        return models or [None]
+
+    def _prepare_skill_workspace(
+        self, paper: Paper, review: Review, pdf: Path, fingerprint: str
+    ) -> tuple[Path, str]:
+        skill_root = Path(__file__).with_name("reading_skill")
+        slug = safe_stem(paper.id, 80)
+        root = Path(self.config.reading_notes_sandbox_dir).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        workspace = root / f"{slug}-{fingerprint[:12]}"
+        if workspace.exists():
+            shutil.rmtree(workspace)
+        workspace.mkdir(parents=True, exist_ok=True)
+        for relative in (
+            "papers",
+            "assets",
+            "assets/crops",
+            f"assets/crops/{slug}",
+            "scripts",
+            "reference",
+            ".tools",
+            "inputs",
+            ".agent-home",
+            ".agent-tmp",
+        ):
+            (workspace / relative).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf, workspace / "papers" / f"{slug}.pdf")
+        shutil.copy2(skill_root / "SKILL.md", workspace / "SKILL.md")
+        shutil.copy2(
+            skill_root / "assets" / "note-template.html",
+            workspace / "assets" / "note-template.html",
+        )
+        for name in ("style.css", "app.js"):
+            shutil.copy2(skill_root / "assets" / name, workspace / "assets" / name)
+        for script in (skill_root / "scripts").glob("*.py"):
+            shutil.copy2(script, workspace / "scripts" / script.name)
+        shutil.copy2(
+            skill_root / "reference" / "example.html",
+            workspace / "reference" / "example.html",
+        )
+        atomic_write(
+            workspace / "inputs" / "paper.json",
+            json.dumps(paper.to_dict(), ensure_ascii=False, indent=2),
+        )
+        atomic_write(
+            workspace / "inputs" / "review.json",
+            json.dumps(asdict(review), ensure_ascii=False, indent=2),
+        )
+        atomic_write(
+            workspace / "index.html",
+            '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+            "<title>论文阅读笔记</title><p>单篇笔记工作区</p></html>",
+        )
+        atomic_write(
+            workspace / "README.md",
+            "# 论文阅读笔记工作区\n\n本目录由 PaperCollector 自动生成。\n",
+        )
+        if self.config.reading_notes_sandbox_user:
+            try:
+                user = pwd.getpwnam(self.config.reading_notes_sandbox_user)
+            except KeyError as exc:
+                raise ReadingNoteError(
+                    f"找不到笔记沙箱用户：{self.config.reading_notes_sandbox_user}"
+                ) from exc
+            if os.geteuid() != 0:
+                raise ReadingNoteError("配置了笔记沙箱用户，但当前进程不是 root")
+            workspace.chmod(0o755)
+            for relative in ("papers", "assets/crops", ".tools", ".agent-home", ".agent-tmp"):
+                path = workspace / relative
+                os.chown(path, user.pw_uid, user.pw_gid)
+                path.chmod(0o700)
+            (workspace / "papers" / f"{slug}.pdf").chmod(0o644)
+            # atomic_write leaves root-only 0600 files; the sandbox user must
+            # still be able to read the task inputs.
+            for relative in (
+                "inputs/paper.json",
+                "inputs/review.json",
+                "index.html",
+                "README.md",
+            ):
+                (workspace / relative).chmod(0o644)
+        return workspace, slug
+
+    def _skill_prompt(self, paper: Paper, workspace: Path, slug: str) -> str:
+        return f"""你在受控工作区 {workspace} 中完成一篇中文 HTML 阅读笔记。
+
+工作区之外的写入会被文件沙箱拒绝；不要尝试。不要联网。
+
+论文：{paper.title}（{paper.id}）
+PDF：papers/{slug}.pdf
+论文元数据：inputs/paper.json
+全文审读：inputs/review.json
+模板：assets/note-template.html
+成品参考：reference/example.html
+技能说明：SKILL.md
+脚本：scripts/
+
+步骤：
+1. 先读 SKILL.md 与 reference/example.html，理解成品笔记的章节深度、段落节奏和图表解释方式；再读 PDF。参考笔记只学结构，不抄内容。
+2. 运行 `python3 scripts/find_artifacts.py papers/{slug}.pdf --json .tools/artifacts.json` 盘点图表，把裁剪计划写到 .tools/crop_plan.json（格式见 SKILL.md）。
+3. 运行 `python3 scripts/crop.py --root . --lib papers --plan .tools/crop_plan.json --slug "{slug}"`，再运行 `python3 scripts/contact_sheet.py --root . --slug "{slug}" --out .tools`。查看 contact sheet，必要时调整裁剪并重新运行。
+4. 复制 assets/note-template.html 为 papers/{slug}.html 并填写。模板里的 {{{{PDF文件}}}} 填 `./{slug}.pdf`。
+5. 八个章节锚点必须齐全；每张主文 Figure/Table 都要有精确裁剪和五段解释；至少一条 data-record；证据综合表；核验表。
+6. 正文目标 30k–80k 字符，不要把内容压缩成摘要。每个数字标注物理 PDF 页码。
+7. 禁用词：而是、而非、而不是、并非，出现次数必须为 0。
+8. 运行 `python3 scripts/validate_note.py papers/{slug}.html`，修到退出码 0；再把完成标记写到 papers/{slug}.done。
+9. 只修改工作目录内的文件；不要读取工作区外的凭据或配置。
+
+直接开始工作，不要先复述计划。"""
+
+    def _run_skill_agent(self, prompt: str, workspace: Path, deadline: float) -> None:
+        errors: list[Exception] = []
+        models = self._skill_models()
+        for index, model in enumerate(models):
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                raise AgentUnavailableError("工具型阅读笔记总预算已耗尽")
+            try:
+                self.agent.run_agentic(
+                    prompt,
+                    workspace,
+                    timeout_seconds=remaining,
+                    model_override=model,
+                )
+                self._preferred_model = model
+                return
+            except AgentUnavailableError:
+                raise
+            except AgentError as exc:
+                errors.append(exc)
+                if index == len(models) - 1:
+                    raise AgentError(
+                        "所有已配置的笔记模型均未完成工具型写作："
+                        + "；".join(type(error).__name__ for error in errors)
+                    ) from exc
+                LOGGER.warning(
+                    "工具型笔记模型 %s 调用失败（%s），切换备用模型",
+                    model or "默认",
+                    type(exc).__name__,
+                )
+        raise AgentUnavailableError("没有可用的工具型笔记模型")
+
+    def _crop_skill_plan(self, workspace: Path, slug: str) -> None:
+        plan = workspace / ".tools" / "crop_plan.json"
+        if not plan.is_file():
+            return
+        completed = run_isolated(
+            [
+                sys.executable,
+                str(workspace / "scripts" / "crop.py"),
+                "--root",
+                str(workspace),
+                "--lib",
+                str(workspace / "papers"),
+                "--plan",
+                str(plan),
+                "--slug",
+                slug,
+            ],
+            timeout=300,
+            cwd=workspace,
+            encoding="utf-8",
+        )
+        if completed.returncode != 0:
+            LOGGER.warning(
+                "按模型裁剪计划补裁图表失败：%s",
+                (completed.stderr or completed.stdout or "")[-1000:],
+            )
+
+    def _load_skill_cache(
+        self, artifact_dir: Path, fingerprint: str
+    ) -> tuple[dict[str, Any], str] | None:
+        cache_path = artifact_dir / "reading-note-skill.json"
+        document_path = artifact_dir / "reading-note-skill.html"
+        if not cache_path.is_file() or not document_path.is_file():
+            return None
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            document = document_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if (
+            cache.get("version") != 1
+            or cache.get("pdf_sha256") != fingerprint
+            or not PUBLIC_FILENAME.fullmatch(str(cache.get("public_filename", "")))
+            or not cache.get("title")
+        ):
+            return None
+        if cache.get("html_sha256") != hashlib.sha256(
+            document.encode("utf-8")
+        ).hexdigest():
+            return None
+        return cache, document
+
+    def _ensure_skill(
+        self,
+        paper: Paper,
+        review: Review,
+        pdf: Path,
+        artifact_dir: Path,
+        fingerprint: str,
+    ) -> tuple[Path, str]:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        cached = self._load_skill_cache(artifact_dir, fingerprint)
+        if cached is not None:
+            cache, document = cached
+            title = str(cache["title"])
+            artifact_count = int(cache.get("artifact_count", 0))
+        else:
+            workspace, slug = self._prepare_skill_workspace(
+                paper, review, pdf, fingerprint
+            )
+            prompt = self._skill_prompt(paper, workspace, slug)
+            atomic_write(workspace / "TASK.md", prompt)
+            if self.config.reading_notes_sandbox_user:
+                (workspace / "TASK.md").chmod(0o644)
+            deadline = time.monotonic() + self.config.reading_notes_skill_timeout_seconds
+            self._run_skill_agent(prompt, workspace, deadline)
+            note_path = workspace / "papers" / f"{slug}.html"
+            if not note_path.is_file():
+                raise ReadingNoteError(f"工具型笔记没有写出 papers/{slug}.html")
+            self._crop_skill_plan(workspace, slug)
+            raw = note_path.read_text(encoding="utf-8")
+            problems = skill_validation_problems(
+                raw,
+                workspace,
+                slug,
+                self.config.reading_notes_skill_min_chars,
+            )
+            if problems:
+                repair = (
+                    prompt
+                    + "\n\n上一轮验收失败。请直接修改 papers/"
+                    + slug
+                    + ".html，只修复下列问题，不要重写无关章节；修完重新运行验证：\n- "
+                    + "\n- ".join(problems)
+                )
+                self._run_skill_agent(repair, workspace, deadline)
+                raw = note_path.read_text(encoding="utf-8")
+                problems = skill_validation_problems(
+                    raw,
+                    workspace,
+                    slug,
+                    self.config.reading_notes_skill_min_chars,
+                )
+            if problems:
+                raise ReadingNoteError(
+                    "工具型阅读笔记未通过验收：" + "；".join(problems[:8])
+                )
+            document, title, artifact_count = inline_skill_document(
+                raw, workspace, slug, paper
+            )
+            cache = {
+                "version": 1,
+                "pdf_sha256": fingerprint,
+                "public_filename": secrets.token_hex(16) + ".html",
+                "title": title,
+                "artifact_count": artifact_count,
+                "html_sha256": hashlib.sha256(document.encode("utf-8")).hexdigest(),
+            }
+            atomic_write(artifact_dir / "reading-note-skill.html", document)
+            atomic_write(
+                artifact_dir / "reading-note-skill.json",
+                json.dumps(cache, ensure_ascii=False, indent=2),
+            )
+            shutil.rmtree(workspace, ignore_errors=True)
+        if len(document.encode("utf-8")) > MAX_NOTE_BYTES:
+            raise ReadingNoteError("内嵌图表的笔记超过 64 MiB，拒绝发布无法提供访问的页面")
+        local_path = artifact_dir / "阅读笔记.html"
+        public_path = self.config.reading_notes_dir / "notes" / cache["public_filename"]
+        atomic_write(local_path, document)
+        atomic_write(public_path, document)
+        publish_remote_note(self.config, public_path, cache["public_filename"])
+        self._index(paper, title, cache["public_filename"], artifact_count)
+        return local_path, f"{self.config.reading_notes_base_url}/notes/{cache['public_filename']}"
 
     def repair_connectives(self, note: dict[str, Any], workspace: Path) -> dict[str, Any]:
         passages = banned_passages(note)
@@ -809,6 +1243,15 @@ class ReadingNotes:
         cache_path = workspace / "validated.json"
         with pdf.open("rb") as handle:
             fingerprint = hashlib.file_digest(handle, "sha256").hexdigest()
+        if self.config.reading_notes_engine == "skill":
+            try:
+                return self._ensure_skill(paper, review, pdf, artifact_dir, fingerprint)
+            except AgentUnavailableError:
+                raise
+            except (AgentError, ReadingNoteError) as exc:
+                if not self.config.reading_notes_skill_fallback:
+                    raise
+                LOGGER.warning("工具型阅读笔记失败，回退到 JSON 流水线：%s", exc)
         inventory, previews = pdf_inventory(pdf, workspace)
         cache = None
         if cache_path.exists():
@@ -935,17 +1378,24 @@ class ReadingNotes:
         atomic_write(local_path, document)
         atomic_write(public_path, document)
         publish_remote_note(self.config, public_path, cache["public_filename"])
-        self._index(paper, cache)
+        self._index(
+            paper,
+            cache["note"]["title_zh"],
+            cache["public_filename"],
+            len(cache["plan"]["artifacts"]),
+        )
         return local_path, f"{self.config.reading_notes_base_url}/notes/{cache['public_filename']}"
 
-    def _index(self, paper: Paper, cache: dict[str, Any]) -> None:
+    def _index(
+        self, paper: Paper, title: str, public_filename: str, artifact_count: int
+    ) -> None:
         path = self.config.reading_notes_dir / "index.json"
         entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         entries[paper.id] = {
-            "title": cache["note"]["title_zh"],
+            "title": title,
             "original_title": paper.title,
-            "href": "notes/" + cache["public_filename"],
-            "artifact_count": len(cache["plan"]["artifacts"]),
+            "href": "notes/" + public_filename,
+            "artifact_count": artifact_count,
         }
         cards = []
         for entry in entries.values():

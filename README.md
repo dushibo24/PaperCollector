@@ -245,6 +245,37 @@ bash deploy/install-notes-service.sh
 也可以给 `public_base_url` 加路径前缀；反向代理需保留该前缀，并为公网访问配置 HTTPS 和访问限流。
 内置 HTTP 服务适合个人轻量使用，不应直接用 `python -m http.server` 暴露整个项目目录。
 
+### 笔记引擎：JSON 与工具型 skill
+
+`engine` 决定生成方式：代码默认 `json` 保持原有流水线，示例配置与生产部署使用 `skill`，
+让 Claude Code 以与交互式命令相同的能力
+（Read/Write/Edit/Bash）在一次性工作区中执行内置的 `paper-reading-notes` 技能，直接写出完整 HTML：
+
+```toml
+[reading_notes]
+engine = "skill"
+model = "deepseek-v4-pro"
+fallback_models = ["deepseek-flash"]
+skill_timeout_seconds = 3600
+skill_min_chars = 20000
+skill_fallback_to_json = true
+sandbox_user = "papernotes"
+sandbox_dir = "/var/lib/papercollector/work"
+```
+
+- `skill` 流程会先读技能说明和成品参考，运行脚本盘点图表、裁剪并生成联系表，再按模板填写八个章节，
+  最后重新运行校验脚本。它比 JSON 流程多一次完整模型会话，20–40 分钟属正常；
+  `skill_timeout_seconds` 是这一阶段的总预算，首次生成与自动修复共用。
+- 写入限制：`--restricted` 约束内置文件工具；Bash 再由 Landlock（Linux）或 `sandbox-exec`（macOS）
+  限制为只能写工作区及 `/dev/null`、`/dev/tty`。配置 `sandbox_user` 时整条 Claude 进程还会通过
+  `setpriv` 降权到该用户，形成第二层隔离；`sandbox_dir` 不能放在仅 root 可读取的目录下，
+  且须能被该用户遍历。
+- 生成后仍做确定性验收：八个章节锚点、图表与 data-record、禁用连接词、未填占位符、最小篇幅
+  （`skill_min_chars`）以及 `scripts/validate_note.py`。失败时在同一工作区自动修复一次；
+  仍失败且 `skill_fallback_to_json = true` 时回退到 JSON 流程，设为 `false` 则直接报错。
+- 工作区成功后删除；失败时保留 `TASK.md`、`agent.stdout.txt`、`agent.stderr.txt`、
+  `agent.envelope.json` 便于排查。`model` 与 `fallback_models` 和 JSON 流程共用。
+
 ### app-server 运行，VPS 只托管 HTML
 
 所有业务始终部署并运行在 app-server：每天的任务、论文抓取、模型审读、翻译、
@@ -313,8 +344,8 @@ VPS 模式不需要在 app-server 上启动 HTTP 服务，也不要在 app-serve
   数值、证据页及其余段落保持不变；仍未通过时最多自动重做一次，
   仍失败时保留流水线状态，不发送缺少阅读笔记的通知。
 - 已验收内容按 PDF SHA-256 缓存在知识库中，通知重试、重建丢失的公开 HTML 或修改访问域名
-  不会重新调用模型，也不为旧笔记再生成一份重复提纲；保留原内容和 URL。笔记会增加两阶段模型调用、token 用量和处理时间，必要时追加小型措辞修订调用；
-  配置中的 timeout 为每阶段上限。
+  不会重新调用模型，也不为旧笔记再生成一份重复提纲；保留原内容和 URL。JSON 引擎会增加两阶段模型调用、token 用量和处理时间，必要时追加小型措辞修订调用；
+  配置中的 timeout 为每阶段上限。`skill` 引擎的缓存、发布与验收门槛相同，预算见 `skill_timeout_seconds`。
 - 生成后的完整草稿也会绑定原 PDF 指纹保存。数据记录仅存在单个提前闭合的根括号或 Markdown 围栏时，
   可不改字段和值地纠正格式；重复键、丢失结构、额外对象或非标准数值仍拒绝发布。
   低于完整性门槛时拒绝发布，不再自动追加段落凑字数。

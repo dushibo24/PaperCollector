@@ -109,7 +109,10 @@ share_password = ""
 timeout_seconds = 1800
 
 [reading_notes]
-# 笔记可单独选择模型；留空沿用 agent.model。备用模型必须事先实测图像及 JSON 输出可用。
+# skill: 让 Claude Code 直接运行论文笔记 skill（Bash/Write/Read，输出自包含 HTML）。
+# json:  旧的单次 JSON 生成 + 代码渲染路径。
+engine = "skill"
+# 笔记可单独选择模型；留空沿用 agent.model。备用模型按顺序切换。
 model = ""
 fallback_models = []
 enabled = false
@@ -118,6 +121,14 @@ host = "0.0.0.0"
 port = 8765
 timeout_seconds = 1800
 min_chars = 1000
+# 工具型笔记的预算与验收下限。正文低于 skill_min_chars 会要求模型补写。
+skill_timeout_seconds = 3600
+skill_min_chars = 20000
+skill_fallback_to_json = true
+# 生产环境建议使用独立系统用户；该用户只能写入 sandbox_dir。
+# 未配置用户时仍会用 Landlock 限制写入，但进程保留当前用户权限。
+sandbox_user = ""
+sandbox_dir = ""
 publish_ssh_host = ""
 publish_ssh_directory = ""
 publish_timeout_seconds = 180

@@ -82,6 +82,12 @@ class AppConfig:
     reading_notes_port: int = 8765
     reading_notes_timeout_seconds: int = 1800
     reading_notes_min_chars: int = 1000
+    reading_notes_engine: str = "json"
+    reading_notes_skill_timeout_seconds: int = 3600
+    reading_notes_skill_min_chars: int = 20000
+    reading_notes_skill_fallback: bool = True
+    reading_notes_sandbox_user: str = ""
+    reading_notes_sandbox_dir: str = ""
     reading_notes_model: str | None = None
     reading_notes_fallback_models: list[str] = field(default_factory=list)
     reading_notes_publish_ssh_host: str = ""
@@ -345,11 +351,37 @@ def load_config(path: str | Path) -> AppConfig:
             "reading_notes.model 必须为模型名，fallback_models 最多包含两个非空模型名"
         )
     notes_min_chars = int(reading_notes.get("min_chars", 1000))
+    notes_engine = str(reading_notes.get("engine", "json")).strip().lower()
+    if notes_engine not in {"json", "skill"}:
+        raise ConfigError("reading_notes.engine 只能是 json 或 skill")
+    notes_skill_timeout = int(
+        reading_notes.get("skill_timeout_seconds", notes_timeout)
+    )
+    notes_skill_min_chars = int(reading_notes.get("skill_min_chars", 20000))
+    notes_skill_fallback = bool(reading_notes.get("skill_fallback_to_json", True))
+    notes_sandbox_user = str(reading_notes.get("sandbox_user", "")).strip()
+    if notes_sandbox_user and not re.fullmatch(
+        r"[a-z_][a-z0-9_-]{0,31}", notes_sandbox_user
+    ):
+        raise ConfigError("reading_notes.sandbox_user 必须是合法的系统用户名")
+    notes_sandbox_dir = str(reading_notes.get("sandbox_dir", "")).strip()
+    if notes_sandbox_dir and not notes_sandbox_dir.startswith("/"):
+        raise ConfigError("reading_notes.sandbox_dir 必须是绝对路径")
+    if notes_engine == "skill" and notes_sandbox_user and not notes_sandbox_dir:
+        raise ConfigError(
+            "启用沙箱用户时需要配置 reading_notes.sandbox_dir（该用户无法进入 data_dir）"
+        )
     if not 1 <= notes_port <= 65535:
         raise ConfigError("reading_notes.port 必须在 1 到 65535 之间")
-    if notes_timeout <= 0 or not 1000 <= notes_min_chars <= 80000:
+    if (
+        notes_timeout <= 0
+        or notes_skill_timeout <= 0
+        or not 1000 <= notes_min_chars <= 80000
+        or not 1000 <= notes_skill_min_chars <= 80000
+    ):
         raise ConfigError(
-            "阅读笔记 timeout_seconds 必须为正数，min_chars 必须在 1000 到 80000 之间"
+            "阅读笔记 timeout_seconds/skill_timeout_seconds 必须为正数，"
+            "min_chars/skill_min_chars 必须在 1000 到 80000 之间"
         )
     notes_ssh_host = str(reading_notes.get("publish_ssh_host", ""))
     notes_ssh_directory = str(reading_notes.get("publish_ssh_directory", ""))
@@ -419,6 +451,13 @@ def load_config(path: str | Path) -> AppConfig:
         reading_notes_port=notes_port,
         reading_notes_timeout_seconds=notes_timeout,
         reading_notes_min_chars=notes_min_chars,
+        reading_notes_engine=notes_engine,
+        reading_notes_skill_timeout_seconds=notes_skill_timeout,
+        reading_notes_skill_min_chars=notes_skill_min_chars,
+        reading_notes_skill_fallback=notes_skill_fallback,
+        reading_notes_sandbox_user=notes_sandbox_user,
+        reading_notes_sandbox_dir=notes_sandbox_dir
+        or str(data_dir / "note-sandbox"),
         reading_notes_model=notes_model,
         reading_notes_fallback_models=list(dict.fromkeys(notes_fallback_models)),
         reading_notes_publish_ssh_host=notes_ssh_host,

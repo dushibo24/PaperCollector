@@ -100,6 +100,65 @@ class BaseAgent:
             json.dumps(utf8_value(result), ensure_ascii=False), encoding="utf-8"
         )
 
+    def _run_with_retries(
+        self,
+        prepared: str,
+        command: list[str],
+        *,
+        env: dict[str, str] | None,
+        cwd: Path | None,
+        timeout: int,
+        parse,
+        before_attempt=None,
+    ):
+        deadline = time.monotonic() + timeout
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AgentUnavailableError(
+                    f"{self.provider_name} 超时（总预算 {timeout}s）"
+                )
+            if before_attempt is not None:
+                before_attempt()
+            try:
+                completed = run_isolated(
+                    command,
+                    input=prepared,
+                    timeout=remaining,
+                    env=env,
+                    cwd=cwd,
+                    encoding=self.encoding,
+                )
+            except FileNotFoundError as exc:
+                raise AgentError(
+                    f"找不到 {self.provider_name} CLI：{self._binary()}"
+                ) from exc
+            except UnicodeError as exc:
+                raise AgentDataError(
+                    f"{self.provider_name} 输出不是有效的 UTF-8 文本"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise AgentUnavailableError(
+                    f"{self.provider_name} 超时（总预算 {timeout}s）"
+                ) from exc
+            try:
+                return parse(completed)
+            except _TransientFailure as exc:
+                if (
+                    attempt == len(RETRY_DELAYS)
+                    or deadline - time.monotonic() <= RETRY_DELAYS[attempt]
+                ):
+                    raise AgentUnavailableError(str(exc)) from exc
+                delay = RETRY_DELAYS[attempt]
+                LOGGER.warning(
+                    "模型服务暂时不可用，%s 秒后重试（%s/%s），保留当前论文进度",
+                    delay,
+                    attempt + 1,
+                    len(RETRY_DELAYS),
+                )
+                time.sleep(delay)
+        raise AgentUnavailableError(f"{self.provider_name} 暂时不可用")
+
     def _run(
         self,
         prompt: str,
@@ -116,58 +175,31 @@ class BaseAgent:
             raise AgentDataError(f"模型输入包含无效 Unicode：{exc}") from exc
         output.parent.mkdir(parents=True, exist_ok=True)
         timeout = timeout_seconds or self.config.agent_timeout_seconds
-        deadline = time.monotonic() + timeout
         prepared = self._prepare_prompt(prompt, images)
         model = model_override or self.config.agent_model
         with self._execution_context(output, images) as (env, cwd):
             command = self._command(
                 prepared, schema, output, images=images, model=model, cwd=cwd
             )
-            for attempt in range(len(RETRY_DELAYS) + 1):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise AgentUnavailableError(
-                        f"{self.provider_name} 超时（总预算 {timeout}s）"
-                    )
-                self._clear_outputs(output)
-                try:
-                    completed = run_isolated(
-                        command,
-                        input=prepared,
-                        timeout=remaining,
-                        env=env,
-                        cwd=cwd,
-                        encoding=self.encoding,
-                    )
-                except FileNotFoundError as exc:
-                    raise AgentError(
-                        f"找不到 {self.provider_name} CLI：{self._binary()}"
-                    ) from exc
-                except UnicodeError as exc:
-                    raise AgentDataError(
-                        f"{self.provider_name} 输出不是有效的 UTF-8 文本"
-                    ) from exc
-                except subprocess.TimeoutExpired as exc:
-                    raise AgentUnavailableError(
-                        f"{self.provider_name} 超时（总预算 {timeout}s）"
-                    ) from exc
-                try:
-                    return self._extract_result(completed, output)
-                except _TransientFailure as exc:
-                    if (
-                        attempt == len(RETRY_DELAYS)
-                        or deadline - time.monotonic() <= RETRY_DELAYS[attempt]
-                    ):
-                        raise AgentUnavailableError(str(exc)) from exc
-                    delay = RETRY_DELAYS[attempt]
-                    LOGGER.warning(
-                        "模型服务暂时不可用，%s 秒后重试（%s/%s），保留当前论文进度",
-                        delay,
-                        attempt + 1,
-                        len(RETRY_DELAYS),
-                    )
-                    time.sleep(delay)
-        raise AgentUnavailableError(f"{self.provider_name} 暂时不可用")
+            return self._run_with_retries(
+                prepared,
+                command,
+                env=env,
+                cwd=cwd,
+                timeout=timeout,
+                parse=lambda completed: self._extract_result(completed, output),
+                before_attempt=lambda: self._clear_outputs(output),
+            )
+
+    def run_agentic(
+        self,
+        prompt: str,
+        workspace: Path,
+        *,
+        timeout_seconds: int | None = None,
+        model_override: str | None = None,
+    ) -> str:
+        raise AgentError(f"{self.provider_name} 不支持工具型长任务")
 
     def _interests_json(self) -> str:
         payload = [
