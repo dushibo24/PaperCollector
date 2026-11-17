@@ -269,7 +269,8 @@ sandbox_dir = "/var/lib/papercollector/work"
 - 写入限制：`--restricted` 约束内置文件工具；Bash 再由 Landlock（Linux）或 `sandbox-exec`（macOS）
   限制为只能写工作区及 `/dev/null`、`/dev/tty`。配置 `sandbox_user` 时整条 Claude 进程还会通过
   `setpriv` 降权到该用户，形成第二层隔离；`sandbox_dir` 不能放在仅 root 可读取的目录下，
-  且须能被该用户遍历。
+  且须能被该用户遍历。该用户还必须能读取并执行 venv 与 Claude CLI；若依赖是在更严格的
+  umask 下安装的（例如 PyMuPDF 目录为 700），需对其执行 `chmod -R o+rX`。
 - 生成后仍做确定性验收：八个章节锚点、图表与 data-record、禁用连接词、未填占位符、最小篇幅
   （`skill_min_chars`）以及 `scripts/validate_note.py`。失败时在同一工作区自动修复一次；
   仍失败且 `skill_fallback_to_json = true` 时回退到 JSON 流程，设为 `false` 则直接报错。

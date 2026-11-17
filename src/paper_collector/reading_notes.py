@@ -12,6 +12,7 @@ import pwd
 import re
 import secrets
 import shutil
+import stat
 import struct
 import sys
 import time
@@ -959,8 +960,28 @@ class ReadingNotes:
                 ) from exc
             if os.geteuid() != 0:
                 raise ReadingNoteError("配置了笔记沙箱用户，但当前进程不是 root")
+            probe = root
+            while True:
+                if not probe.stat().st_mode & stat.S_IXOTH:
+                    raise ReadingNoteError(
+                        f"沙箱目录 {probe} 无法被 {user.pw_name} 遍历，请执行 chmod o+x"
+                    )
+                if probe == probe.parent:
+                    break
+                probe = probe.parent
             workspace.chmod(0o755)
-            for relative in ("papers", "assets/crops", ".tools", ".agent-home", ".agent-tmp"):
+            # The process may run with umask 077; the sandbox user still needs
+            # to traverse the read-only directories.
+            for relative in ("assets", "reference", "scripts", "inputs"):
+                (workspace / relative).chmod(0o755)
+            for relative in (
+                "papers",
+                "assets/crops",
+                f"assets/crops/{slug}",
+                ".tools",
+                ".agent-home",
+                ".agent-tmp",
+            ):
                 path = workspace / relative
                 os.chown(path, user.pw_uid, user.pw_gid)
                 path.chmod(0o700)
