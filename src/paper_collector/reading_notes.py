@@ -723,11 +723,19 @@ def inline_skill_document(
         document = document.replace("</head>", f"<style>{style}</style></head>", 1)
     if "<script" not in document.lower():
         document = document.replace("</body>", f"<script>{script}</script></body>", 1)
+    # The crop anchors carry the layout classes (``chart-image cropped-image``)
+    # and, in the source gallery, group an image with its label.  Keep the
+    # element but drop the link: the full-size image is already inline.
+    def drop_crop_href(match: re.Match) -> str:
+        opening = re.sub(r'\s+href="[^"]*"', "", match.group(0))
+        opening = re.sub(r'\s+target="[^"]*"', "", opening)
+        return re.sub(r'\s+rel="[^"]*"', "", opening)
+
     document = re.sub(
-        r'<a\b[^>]*href="[^"]*assets/crops/[^"]*"[^>]*>(.*?)</a>',
-        r"\1",
+        r'<a\b[^>]*href="[^"]*assets/crops/[^"]*"[^>]*>',
+        drop_crop_href,
         document,
-        flags=re.DOTALL | re.IGNORECASE,
+        flags=re.IGNORECASE,
     )
     document = re.sub(
         r'href="[^"]*assets/crops/[^"]*"', 'href="#"', document, flags=re.IGNORECASE
@@ -1163,6 +1171,9 @@ PDF：papers/{slug}.pdf
                 raise ReadingNoteError(
                     "工具型阅读笔记未通过验收：" + "；".join(problems[:8])
                 )
+            # Keep the agent's own HTML so an inlining tweak can be re-run
+            # without asking the model to rewrite the note.
+            atomic_write(artifact_dir / "reading-note-skill.raw.html", raw)
             document, title, artifact_count = inline_skill_document(
                 raw, workspace, slug, paper
             )

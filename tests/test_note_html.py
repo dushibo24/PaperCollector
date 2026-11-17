@@ -43,8 +43,11 @@ def build_workspace(tmp_path):
         '<progress id="reading-progress"></progress>'
         "<h1>测试笔记标题</h1>"
         f"{sections}"
-        '<article class="artifact"><a href="../assets/crops/'
+        '<article class="artifact"><a class="chart-image cropped-image" href="../assets/crops/'
         f'{SLUG}/fig.png"><img src="../assets/crops/{SLUG}/fig.png" alt="图"></a></article>'
+        '<div class="gallery"><a href="../assets/crops/'
+        f'{SLUG}/fig.png"><img src="../assets/crops/{SLUG}/fig.png" alt="图">'
+        "<span>Figure 1 · p1</span></a></div>"
         '<pre class="data-record">{}</pre>'
         f'<a href="./{SLUG}.pdf#page=2">p2</a>'
         '<a href="../index.html">index</a>'
@@ -68,6 +71,8 @@ def test_inline_skill_document_makes_html_self_contained(tmp_path):
     assert "console.log(1)" in result
     assert "data:image/png;base64," in result
     assert "assets/crops" not in result
+    assert 'class="chart-image cropped-image"' in result
+    assert "Figure 1 · p1" in result
     assert 'href="https://example.com/paper.pdf#page=2"' in result
     assert 'href="../index.html"' not in result
     assert "{{" not in result
