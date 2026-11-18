@@ -1053,14 +1053,17 @@ PDF：papers/{slug}.pdf
             except AgentError as exc:
                 errors.append(exc)
                 if index == len(models) - 1:
+                    detail = "；".join(
+                        f"{error.__class__.__name__}: {error}" for error in errors
+                    )
                     raise AgentError(
-                        "所有已配置的笔记模型均未完成工具型写作："
-                        + "；".join(type(error).__name__ for error in errors)
+                        "所有已配置的笔记模型均未完成工具型写作：" + detail[:2000]
                     ) from exc
                 LOGGER.warning(
-                    "工具型笔记模型 %s 调用失败（%s），切换备用模型",
+                    "工具型笔记模型 %s 调用失败（%s），切换备用模型：%s",
                     model or "默认",
                     type(exc).__name__,
+                    str(exc)[:400],
                 )
         raise AgentUnavailableError("没有可用的工具型笔记模型")
 

@@ -8,7 +8,10 @@ export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export HF_HUB_OFFLINE=1
 export OMP_NUM_THREADS=4
 cd "$repo_root"
-mkdir -p data/logs
+mkdir -p data/logs data/tmp
+# The container's root overlay can run out of space; keep child temp files
+# next to the run data, which lives on the large volume.
+export TMPDIR="$repo_root/data/tmp"
 exec >>"data/logs/cron-$(date +%F).log" 2>&1
 if [[ "${1:-}" == "--check-delivery" ]]; then
     shift
