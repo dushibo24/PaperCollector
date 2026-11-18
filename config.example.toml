@@ -75,6 +75,8 @@ diversity_penalty = 1.5
 enabled = true
 pdf2zh_bin = "pdf2zh"
 # pdf2zh 的 OpenAI 兼容接口；真实 API Key 建议通过 .env 提供。
+# DeepSeek 示例：Base URL 填 https://api.deepseek.com/v1，模型填 deepseek-flash，
+# Key 可直接写 ${ANTHROPIC_AUTH_TOKEN} 复用 Claude 代理凭据。
 service = "openailiked"
 OPENAILIKED_BASE_URL = "${OPENAILIKED_BASE_URL}"
 OPENAILIKED_API_KEY = "${OPENAILIKED_API_KEY}"
@@ -82,10 +84,10 @@ OPENAILIKED_MODEL = "${OPENAILIKED_MODEL}"
 threads = 4
 skip_subset_fonts = false
 timeout_seconds = 3600
-# 每篇每次最多占用 30 分钟，按 5 页分段缓存；恢复任务续作，不重译已完成段。
+# 每篇每次最多占用 60 分钟，按 5 页分段缓存；恢复任务续作，不重译已完成段。
 chunk_pages = 5
-chunk_timeout_seconds = 600
-attempt_timeout_seconds = 1800
+chunk_timeout_seconds = 900
+attempt_timeout_seconds = 3600
 
 [notify]
 # 默认：Server酱把导读和百度网盘链接推送到个人微信。

@@ -44,7 +44,7 @@ cp .env.example .env
 
 1. 把邮箱改为真实地址（OpenAlex polite pool 要求）。
 2. 按需修改 `[[interests]]` 研究方向。小同行用 `scope = "niche"`，大同行用 `scope = "broad"`。
-3. 在 `.env` 填 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`（例如 DeepSeek 的 `https://api.deepseek.com/anthropic`），可选填 `ANTHROPIC_MODEL`；再填 `SERVERCHAN_SENDKEY`；有 Semantic Scholar、IEEE Xplore 或 Elsevier key 也可一并填写。OpenAI-compatible 翻译还需填写 `OPENAILIKED_BASE_URL`、`OPENAILIKED_API_KEY` 和 `OPENAILIKED_MODEL`。
+3. 在 `.env` 填 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`（例如 DeepSeek 的 `https://api.deepseek.com/anthropic`），可选填 `ANTHROPIC_MODEL`；再填 `SERVERCHAN_SENDKEY`；有 Semantic Scholar、IEEE Xplore 或 Elsevier key 也可一并填写。OpenAI-compatible 翻译还需填写 `OPENAILIKED_BASE_URL`、`OPENAILIKED_API_KEY` 和 `OPENAILIKED_MODEL`；用 DeepSeek 翻译时填 `https://api.deepseek.com/v1` 和 `deepseek-flash`，`OPENAILIKED_API_KEY` 可留空并在 `config.toml` 写 `${ANTHROPIC_AUTH_TOKEN}` 复用同一个 Key。
    OpenReview 的匿名 API 可能要求人机验证；如需稳定抓取 ICLR/TMLR，请填写 `OPENREVIEW_USERNAME` 和 `OPENREVIEW_PASSWORD`。启用 MFA 的账号可改填 `OPENREVIEW_ACCESS_TOKEN`，令牌优先于账号密码。
 4. 根据领域补充 `top_venues` 和 `strong_venues`。venue 名称忽略大小写。
 5. 在 `[baidupan].cookie` 填写百度网盘网页 Cookie。`doctor` 或首次上传会在 CLI 未登录时自动登录；已有有效登录状态时不会重复登录。
