@@ -100,6 +100,7 @@ class AppConfig:
     translation_chunk_timeout_seconds: int = 600
     translation_attempt_timeout_seconds: int = 1800
     run_timeout_seconds: int = 10800
+    baidupan_enabled: bool = True
 
     @property
     def reading_notes_dir(self) -> Path:
@@ -360,12 +361,14 @@ def load_config(path: str | Path) -> AppConfig:
     notes_skill_min_chars = int(reading_notes.get("skill_min_chars", 20000))
     notes_skill_fallback = bool(reading_notes.get("skill_fallback_to_json", True))
     notes_sandbox_user = str(reading_notes.get("sandbox_user", "")).strip()
+    if notes_sandbox_user and os.name != "posix":
+        raise ConfigError("reading_notes.sandbox_user 仅支持 Linux")
     if notes_sandbox_user and not re.fullmatch(
         r"[a-z_][a-z0-9_-]{0,31}", notes_sandbox_user
     ):
         raise ConfigError("reading_notes.sandbox_user 必须是合法的系统用户名")
     notes_sandbox_dir = str(reading_notes.get("sandbox_dir", "")).strip()
-    if notes_sandbox_dir and not notes_sandbox_dir.startswith("/"):
+    if notes_sandbox_dir and not Path(notes_sandbox_dir).is_absolute():
         raise ConfigError("reading_notes.sandbox_dir 必须是绝对路径")
     if notes_engine == "skill" and notes_sandbox_user and not notes_sandbox_dir:
         raise ConfigError(
@@ -468,6 +471,7 @@ def load_config(path: str | Path) -> AppConfig:
         serverchan_sendkey=serverchan_sendkey,
         wecom_webhook_key=webhook_key,
         wecom_enabled=bool(notify.get("wecom_enabled", True)),
+        baidupan_enabled=bool(baidupan.get("enabled", True)),
         baidupcs_bin=str(baidupan.get("bin", "BaiduPCS-Go")),
         baidupcs_remote_dir=baidupcs_remote_dir,
         baidupcs_share_period_days=share_period_days,

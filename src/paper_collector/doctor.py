@@ -73,7 +73,6 @@ def _agent_checks(config: AppConfig) -> list[Check]:
 def run_checks(config: AppConfig) -> list[Check]:
     checks = [
         *_agent_checks(config),
-        _command_check("pdf2zh", config.pdf2zh_bin, ["--help"], "--lang-out"),
         _network_check("OpenAlex", "https://api.openalex.org/works?per-page=1"),
         _network_check(
             "arXiv",
@@ -129,6 +128,10 @@ def run_checks(config: AppConfig) -> list[Check]:
         )
     else:
         checks.append(Check(True, "会议/期刊官网", "已禁用，仅使用聚合源"))
+    if config.translation_enabled:
+        checks.append(_command_check("pdf2zh", config.pdf2zh_bin, ["--help"], "--lang-out"))
+    else:
+        checks.append(Check(True, "pdf2zh", "已禁用翻译，仅保留英文原文"))
     if config.translation_enabled and config.translation_service == "openailiked":
         configured = all(
             (
@@ -154,12 +157,15 @@ def run_checks(config: AppConfig) -> list[Check]:
                 "已配置 SendKey" if config.serverchan_sendkey else "缺少 SERVERCHAN_SENDKEY",
             )
         )
-        try:
-            publisher = BaiduPCSGoPublisher(config)
-            detail = publisher.ensure_login()
-            checks.append(Check(True, "百度网盘", detail))
-        except PublishError as exc:
-            checks.append(Check(False, "百度网盘", str(exc)))
+        if config.baidupan_enabled:
+            try:
+                publisher = BaiduPCSGoPublisher(config)
+                detail = publisher.ensure_login()
+                checks.append(Check(True, "百度网盘", detail))
+            except PublishError as exc:
+                checks.append(Check(False, "百度网盘", str(exc)))
+        else:
+            checks.append(Check(True, "百度网盘", "已禁用，推送不附下载链接"))
     elif config.notify_channel == "wecom":
         checks.append(
             Check(

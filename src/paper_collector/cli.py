@@ -13,7 +13,8 @@ from paper_collector.config import ConfigError, load_config
 from paper_collector.doctor import run_checks
 from paper_collector.notes_server import serve_notes
 from paper_collector.pipeline import Pipeline, PipelineBusyError
-from paper_collector.scheduler import install_launchd, uninstall_launchd
+from paper_collector.scheduler import install_schedule, uninstall_schedule
+from paper_collector.setup_wizard import run_setup
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -23,6 +24,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # Options are parsed by the wizard itself; see `paper-collector setup --help`.
+    sub.add_parser("setup", help="安装向导：选择功能并生成配置", add_help=False)
     init = sub.add_parser("init", help="生成 config.toml")
     init.add_argument("--force", action="store_true", help="覆盖已有配置")
 
@@ -53,7 +56,9 @@ def _parser() -> argparse.ArgumentParser:
     write_note.add_argument("paper_id")
     write_note.add_argument("--config", default="config.toml")
 
-    schedule = sub.add_parser("schedule", help="管理 macOS 每日定时任务")
+    schedule = sub.add_parser(
+        "schedule", help="管理每日定时任务（macOS launchd / Linux cron / Windows 计划任务）"
+    )
     schedule.add_argument("action", choices=["install", "uninstall"])
     schedule.add_argument("--config", default="config.toml")
     schedule.add_argument("--hour", type=int, default=9)
@@ -62,6 +67,17 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["setup"]:
+        try:
+            run_setup(argv[1:], Path.cwd())
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消。", file=sys.stderr)
+            raise SystemExit(130) from None
+        except (RuntimeError, OSError) as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        return
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     root = Path.cwd()
@@ -75,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"已生成 {target}，请先填写邮箱和兴趣，并在 .env 配置 SERVERCHAN_SENDKEY。")
             return
         if args.command == "schedule" and args.action == "uninstall":
-            print(f"已移除 {uninstall_launchd()}")
+            print(f"已移除 {uninstall_schedule()} 中的定时任务")
             return
 
         config = load_config(args.config)
@@ -91,7 +107,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "schedule":
             print(
-                f"已安装每日 {args.hour:02d}:{args.minute:02d} 任务：{install_launchd(config, args.hour, args.minute)}"
+                f"已安装每日 {args.hour:02d}:{args.minute:02d} 任务：{install_schedule(config, args.hour, args.minute)}"
             )
             return
 

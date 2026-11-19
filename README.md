@@ -29,6 +29,35 @@
 
 不直接爬 Google Scholar：它没有稳定的公开 API，自动访问容易触发验证码和账号/地址封禁。也不模拟登录或高频抓取 ACM DL；ACM 论文由 OpenAlex 等合规元数据源覆盖。
 
+## 一键安装（macOS / Linux / Windows）
+
+下载发布包 `PaperCollector-<版本>.tar.gz`（macOS/Linux）或 `.zip`（Windows）并解压，然后：
+
+```bash
+./install.sh            # macOS / Linux
+```
+
+```powershell
+.\install.ps1           # Windows PowerShell；也可以直接双击 install.cmd
+```
+
+安装器会在缺少 `uv` 时询问是否安装，然后启动 `paper-collector setup` 向导，逐项选择功能：
+
+| 功能 | 默认 | 关闭后 |
+|---|---|---|
+| 论文发现 + Claude Code 精排深读 | 必选 | — |
+| `pdf2zh` 中英双语翻译 | 关 | 只保留英文原文，无需安装 pdf2zh |
+| 推送通道 Server酱 / 企业微信 | 无 | `none`：产物只保存到本地知识库，算作完成 |
+| 百度网盘上传与分享链接 | 关 | Server酱推送不附下载链接，无需 BaiduPCS-Go |
+| HTML 阅读笔记 | 关 | 不安装 PyMuPDF，不需要笔记服务 |
+| 每日定时任务 | 关 | macOS launchd / Linux 用户 crontab / Windows 计划任务 |
+
+向导只把密钥写入本地 `.env`（权限 600，已被 gitignore），输入不回显；留空可稍后补填。
+也可以不交互：`./install.sh --yes --no-translation --no-baidupan --no-notes --notify none --schedule 09:00`。
+重新运行向导会沿用已有 `config.toml`，只更新功能开关。Windows 上 HTML 笔记自动使用 `json` 引擎（工具型 skill 依赖 Linux/macOS 的文件沙箱）。
+
+维护者发布：`uv run python scripts/build_release.py`。发布包由 `git archive` 生成，只含已提交文件，并会扫描疑似凭据和本机 `.env` 中的值，命中即删除发布包并报错。
+
 ## 快速开始
 
 需要 macOS/Linux、`uv`、可用的 Claude Code CLI（`claude`）、`pdf2zh` 和 `BaiduPCS-Go`。模型调用默认走 `claude -p` 的 JSON Schema 结构化输出；也可以把 `[agent].provider` 改成 `"codex"`，回退到 Codex 的非交互 `exec`、只读 sandbox 和 `--output-schema`。

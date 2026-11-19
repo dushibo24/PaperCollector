@@ -98,6 +98,8 @@ wecom_enabled = false
 wecom_webhook_key = "${WECOM_WEBHOOK_KEY}"
 
 [baidupan]
+# 关闭后 Server酱推送不附下载链接，产物只保存在本地知识库。
+enabled = true
 # 第三方 CLI：https://github.com/qjfoidnh/BaiduPCS-Go
 bin = "BaiduPCS-Go"
 # 若 CLI 尚未登录，doctor / 首次上传会用该 Cookie 自动登录并再次验证。

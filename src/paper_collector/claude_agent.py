@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import shutil
 import subprocess
 import sys
@@ -123,6 +122,8 @@ class ClaudeAgent(BaseAgent):
         name = getattr(self.config, "reading_notes_sandbox_user", "") or ""
         if not name:
             return None
+        import pwd  # POSIX-only; sandbox users are rejected elsewhere on Windows.
+
         try:
             return pwd.getpwnam(name)
         except KeyError as exc:

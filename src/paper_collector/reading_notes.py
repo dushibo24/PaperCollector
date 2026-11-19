@@ -8,7 +8,6 @@ import json
 import logging
 import math
 import os
-import pwd
 import re
 import secrets
 import shutil
@@ -960,6 +959,8 @@ class ReadingNotes:
             "# 论文阅读笔记工作区\n\n本目录由 PaperCollector 自动生成。\n",
         )
         if self.config.reading_notes_sandbox_user:
+            import pwd  # POSIX-only; sandbox users are rejected elsewhere on Windows.
+
             try:
                 user = pwd.getpwnam(self.config.reading_notes_sandbox_user)
             except KeyError as exc:

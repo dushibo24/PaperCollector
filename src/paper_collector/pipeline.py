@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
+import os
 import re
 import shutil
 import signal
@@ -101,10 +101,18 @@ def _finish_receipt_without_budget_interrupt():
 @contextmanager
 def single_instance(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as handle:
+    with lock_path.open("a+") as handle:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
             raise PipelineBusyError("已有一个 Paper Collector 实例正在运行") from exc
         yield
 
@@ -191,6 +199,18 @@ def brief_for_serverchan(
     contributions = "\n".join(f"- {item}" for item in review.contributions[:4])
     evidence = "\n".join(f"- {item}" for item in review.evidence[:4])
     limitations = "\n".join(f"- {item}" for item in review.limitations[:3])
+    download = (
+        f"""## 下载论文 ZIP
+
+[打开百度网盘分享]({share_url})  
+提取码：`{share_password}`  
+ZIP 内含英文原文、中英双语 PDF 和中文导读。
+链接有效期以百度网盘页面显示为准。
+
+"""
+        if share_url
+        else ""
+    )
     return f"""# 今日论文｜{review.title_zh}
 
 > {review.hook}
@@ -209,19 +229,12 @@ def brief_for_serverchan(
 
 {limitations}
 
-## 下载论文 ZIP
-
-[打开百度网盘分享]({share_url})  
-提取码：`{share_password}`  
-ZIP 内含英文原文、中英双语 PDF 和中文导读。
-链接有效期以百度网盘页面显示为准。
-
----
+{download}---
 
 原题：{paper.title}  
 发表：{paper.venue or "预印本"} · {paper.publication_date}  
 推荐分：{review.overall_score:.1f}/10  
-[论文原始页面]({paper.landing_url or paper.pdf_url or share_url})
+[论文原始页面]({paper.landing_url or paper.pdf_url or share_url or ""})
 """ + note_link(note_url)
 
 
@@ -582,7 +595,7 @@ class Pipeline:
                 raise NotifyError("缺少 SERVERCHAN_SENDKEY；产物已生成但未推送")
             share_url = row["share_url"]
             share_password = row["share_password"]
-            if not share_url:
+            if not share_url and self.config.baidupan_enabled:
                 share = BaiduPCSGoPublisher(self.config).publish(package)
                 self.db.save_share(paper.id, share.remote_path, share.url, share.password)
                 share_url = share.url
@@ -612,7 +625,9 @@ class Pipeline:
             self.db.mark_file_delivered(paper.id)
             return
 
-        raise NotifyError("notify.channel=none；产物已生成但未推送")
+        # channel="none" is a local-only install: the knowledge base is the delivery.
+        self.db.mark_file_delivered(paper.id)
+        LOGGER.info("未配置推送通道，产物已保存到本地：%s", package)
 
     def _resume_pending(self, row, *, no_notify: bool) -> str:
         paper = Paper.from_dict(json.loads(row["paper_json"]))

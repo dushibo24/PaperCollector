@@ -1,0 +1,7 @@
+# Release archives (git archive) ship only what end users need.
+tests/ export-ignore
+scripts/build_release.py export-ignore
+.gitattributes export-ignore
+install.ps1 text eol=crlf
+install.cmd text eol=crlf
+*.sh text eol=lf
