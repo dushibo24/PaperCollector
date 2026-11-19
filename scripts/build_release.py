@@ -4,7 +4,7 @@
 
 Archives come from `git archive HEAD`, so untracked/ignored files (config.toml,
 .env, data/) can never be included. Each archive is then scanned for forbidden
-paths, credential-shaped strings and every value from the local .env.
+paths, credential-shaped strings and every credential from the local .env/config.toml.
 """
 
 from __future__ import annotations
@@ -36,17 +36,39 @@ def git(*args: str) -> bytes:
     return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True).stdout
 
 
-def local_secrets() -> list[bytes]:
-    """Every non-trivial value configured locally must be absent from the release."""
-    env = ROOT / ".env"
+SENSITIVE_KEY = re.compile(
+    r"key|token|cookie|password|secret|email|ssh_host|ssh_directory", re.IGNORECASE
+)
+
+
+def _sensitive_strings(table: dict) -> list[str]:
     values = []
+    for key, value in table.items():
+        if isinstance(value, dict):
+            values.extend(_sensitive_strings(value))
+        elif isinstance(value, str) and SENSITIVE_KEY.search(key):
+            values.append(value)
+    return values
+
+
+def local_secrets() -> list[bytes]:
+    """Every credential configured locally (.env or config.toml) must be absent."""
+    values = []
+    env = ROOT / ".env"
     if env.exists():
         for line in env.read_text(encoding="utf-8").splitlines():
             key, sep, value = line.partition("=")
-            value = value.strip().strip("'\"")
-            if sep and not key.startswith("#") and len(value) >= 8:
-                values.append(value.encode())
-    return values
+            if sep and not key.lstrip().startswith("#"):
+                values.append(value.strip().strip("'\""))
+    config = ROOT / "config.toml"
+    if config.exists():
+        values.extend(_sensitive_strings(tomllib.loads(config.read_text(encoding="utf-8"))))
+    placeholders = {"you@example.com"}
+    return [
+        value.encode()
+        for value in values
+        if len(value) >= 8 and not value.startswith("${") and value not in placeholders
+    ]
 
 
 def scan(files: dict[str, bytes]) -> list[str]:
@@ -59,7 +81,9 @@ def scan(files: dict[str, bytes]) -> list[str]:
         for pattern in SECRET_PATTERNS:
             if match := pattern.search(data):
                 problems.append(f"{name}: 疑似凭据 {match.group()[:12]!r}…")
-        problems.extend(f"{name}: 含有本机 .env 中的值" for value in secrets if value in data)
+        problems.extend(
+            f"{name}: 含有本机 .env/config.toml 中的凭据" for value in secrets if value in data
+        )
     return problems
 
 
